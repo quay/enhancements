@@ -17,34 +17,9 @@ status: implementable
 Quay has a data caching mechanism which it uses to cache various objects.
 This proposal is to add Redis as another provider/implementation for this cache.
 
-`-`.
-
-To get started with this template:
-1. **Pick a domain.** Find the appropriate domain to discuss your enhancement.
-1. **Make a copy of this template.** Copy this template into the directory for
-   the domain.
-1. **Fill out the "overview" sections.** This includes the Summary and
-   Motivation sections. These should be easy and explain why the community
-   should desire this enhancement.
-1. **Create a PR.** Assign it to folks with expertise in that domain to help
-   sponsor the process.
-1. **Merge at each milestone.** Merge when the design is able to transition to a
-   new status (provisional, implementable, implemented, etc.). View anything
-   marked as `provisional` as an idea worth exploring in the future, but not
-   accepted as ready to execute. Anything marked as `implementable` should
-   clearly communicate how an enhancement is coded up and delivered. If an
-   enhancement describes a new deployment topology or platform, include a
-   logical description for the deployment, and how it handles the unique aspects
-   of the platform. Aim for single topic PRs to keep discussions focused. If you
-   disagree with what is already in a document, open a new PR with suggested
-   changes.
-
-The `Metadata` section above is intended to support the creation of tooling
-around the enhancement process.
-
 ## Release Signoff Checklist
 
-- [ ] Enhancement is `implementable`
+- [x] Enhancement is `implementable`
 - [ ] Design details are appropriately documented from clear requirements
 - [ ] Test plan is defined
 - [ ] Graduation criteria for dev preview, tech preview, GA
@@ -158,20 +133,6 @@ use Redis
 
 **TODO:** Test plan
 
-### Version Skew Strategy
-
-How will the component handle version skew with other components?
-What are the guarantees? Make sure this is in the test plan.
-
-Consider the following in developing a version skew strategy for this
-enhancement:
-- During an upgrade, we will always have skew among components, how will this impact your work?
-- Does this enhancement involve coordinating behavior in the control plane and
-  in the kubelet? How does an n-2 kubelet without this feature available behave
-  when this feature is used?
-- Will any other components on the node change? For example, changes to CSI, CRI
-  or CNI may require updating that component before the kubelet.
-
 ## Implementation History
 
 Major milestones in the life cycle of a proposal should be tracked in `Implementation
@@ -189,14 +150,6 @@ History`.
 
 * Use a local memcache or in-memory cache
 * Have a faster DB for cases where there is a cache failure
-
-## Infrastructure Needed [optional]
-
-Use this section if you need things from the project. Examples include a new
-subproject, repos requested, github details, and/or testing infrastructure.
-
-Listing these here allows the community to get the process for these resources
-started right away.
 
 ## References
 
