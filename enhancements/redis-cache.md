@@ -3,13 +3,14 @@ title: Redis Cache Provider for Quay
 authors:
   - "@syed"
 reviewers:
-  - "@alecmerdler
+  - "@alecmerdler"
 approvers:
-  - TBD
-
+  - "@syed"
+  - "@alecmerdler"
+  - "@kleesc"
 creation-date: 2021-04-09
-last-updated: 2021-04-09
-status: implementable
+last-updated: 2021-04-14
+status: implemented
 ---
 
 # redis-cache-provider 
@@ -20,7 +21,7 @@ This proposal is to add Redis as another provider/implementation for this cache.
 ## Release Signoff Checklist
 
 - [x] Enhancement is `implementable`
-- [ ] Design details are appropriately documented from clear requirements
+- [x] Design details are appropriately documented from clear requirements
 - [ ] Test plan is defined
 - [ ] Graduation criteria for dev preview, tech preview, GA
 
@@ -70,8 +71,7 @@ snapshots and restore for a quick turnaround in case of failure.
 ## Design Details
 
 Initial work around adding this functionality was done by @alecmerdler in [this PR](https://github.com/quay/quay/pull/444)
-However, more work is needed to support HA with AWS and Redis Sentinel
-
+However, more work is needed to support HA with AWS and Redis Sentinel.
 
 ### Redis High Availability (Elasticache)
 
@@ -83,7 +83,7 @@ This mode requires use of a client library that is cluster aware. This mode is
 useful for large caches where sharding is required to achieve horizontal
 scalability. Based on our analysis on traffic on Quay.io we don't see the need
 for sharding as our data footprint is very small. Hence, we do not recomended
-this method for Quay
+this method for Quay.
    
 #### Redis non-Cluster Mode
 
@@ -92,16 +92,16 @@ sharding. There is a one write master and multiple read-only replicas. The
 redis client from the application connects to a `Primary Endpoint` exposed by
 Elasticache and AWS manages the failover in case of a crash to another node so
 the client can be agnostic to upgrade/changes to redis. This works well for
-Quay as it gives us HA without the complexity of sharding 
+Quay as it gives us HA without the complexity of sharding.
 
 ![](https://d2908q01vomqb2.cloudfront.net/887309d048beef83ad3eabf2a79a64a389ab1c9f/2021/03/10/Screen-Shot-2021-03-10-at-09.44.22.png)
 
-**NOTE** Other cloud providers (GCP, Azure) offer similar HA mode. At this point in time, GCP doesn't support the Cluster Mode for HA
+**NOTE** Other cloud providers (GCP, Azure) offer similar HA mode. At this point in time, GCP doesn't support the Cluster Mode for HA.
 
 ### Standalone Redis High Availability (Sentinel)
 
 Standalone Redis doesn't support HA. Redis Sentinel is the solution which adds
-things like Monitoirng, HA & Failover on top of Redis. Sentinel is deployed on independent
+things like Monitoring, HA & Failover on top of Redis. Sentinel is deployed on independent
 nodes outside of the redis cluster and keeps track of the master/slave nodes. When the master goes
 down Sentinel fails over to the slave node and promotes it to be new new master. The client application
 speaks to the sentinel node(s) to get the list of master and slave nodes
@@ -123,7 +123,9 @@ speaks to the sentinel node(s) to get the list of master and slave nodes
 * Deploy Redis in both AWS Elasticache and on an EC2
 * Both implementations should be functionally identical
 
-**TODO** Add detailed test plan
+**TODO(alecmerdler)** Add detailed test plan
+
+
 ### Upgrade / Downgrade Strategy
 
 Move to Redis cache should be transparent to the deployment and can be deployed
@@ -131,7 +133,7 @@ in a rolling fashion. The new pods will start using the Redis Cache while the ol
 will still use the internal cache and will eventually be replaced with the new pods which
 use Redis
 
-**TODO:** Test plan
+**TODO(alecmerdler):** Test plan
 
 ## Implementation History
 
@@ -139,6 +141,7 @@ Major milestones in the life cycle of a proposal should be tracked in `Implement
 History`.
 
 * 2021-04-09 Initial proposal
+* 2021-04-14 Redis Cache implementation merged (https://github.com/quay/quay/pull/444)
 
 ## Drawbacks
 
