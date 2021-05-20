@@ -135,6 +135,22 @@ use Redis
 
 **TODO(alecmerdler):** Test plan
 
+### Configuration
+
+the `config.yaml` for this enhancement:
+
+```
+DATA_MODEL_CACHE_CONFIG:
+  engine: redis
+  primary_host: <redis-primary-hostname>
+  primary_port: <redis-read-port>
+  replica_host: <redis-replica-hostname>
+  replica_port: <redis-read-port>
+  password: <redis-password>
+  ssl: <true or false>
+  ca_cert: <cert if using SSL>
+```
+
 ## Implementation History
 
 Major milestones in the life cycle of a proposal should be tracked in `Implementation
@@ -142,6 +158,7 @@ History`.
 
 * 2021-04-09 Initial proposal
 * 2021-04-14 Redis Cache implementation merged (https://github.com/quay/quay/pull/444)
+* 2021-05-20 Added configruation for read and write endpoints ()
 
 ## Drawbacks
 
