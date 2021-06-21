@@ -8,8 +8,8 @@ approvers:
   - "@jonathankingfc"
   - "@alecmerdler"
 creation-date: 2021-04-27
-last-updated: 2021-04-27
-status: implementable
+last-updated: 2021-06-21
+status: implemented
 ---
 
 # tls-managed-component
@@ -24,7 +24,7 @@ for the Quay Operator.
 - [x] Enhancement is `implementable`
 - [x] Design details are appropriately documented from clear requirements
 - [x] Test plan is defined
-- [ ] Graduation criteria for dev preview, tech preview, GA
+- [x] Graduation criteria for dev preview, tech preview, GA
 
 ## Open Questions 
 
@@ -131,6 +131,7 @@ so there are no issues with version skew and this component.
 ## Implementation History
 
 * 2021-04-27 Initial proposal
+* 2021-06-15 Pull request merged (https://github.com/quay/quay-operator/pull/469)
 
 ## Drawbacks
 
