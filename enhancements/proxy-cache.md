@@ -21,7 +21,7 @@ status: implementable
 
 Container development has become widely popular. Customers today rely on container images from upstream registries(like docker, gcp) to get desired services up and running.
 Registries now have rate limitation and throttling on the number of times users can pull from these registries.
-This proposal is to enable Quay to act as a pull through cache where, once pulled images are only pulled again when upstream images have been updated.   
+This proposal is to enable Quay to act as a pull through cache where, once pulled images are only pulled again when upstream images have been updated.
 
 ## Release Signoff Checklist
 
@@ -32,20 +32,22 @@ This proposal is to enable Quay to act as a pull through cache where, once pulle
 
 ## Open Questions
 
- > 1. Will the check against the upstream registry count against an upstream rate limit?
- > 2. Currently, How can we track when an image was last used (to implement eviction based on LRU images)?
- > 3. How will time machine work on images that are past its staleness period?
+ 1. Will the check against the upstream registry count against an upstream rate limit?
+ A: No. We use HEAD requests to check for new versions of an image, and HEAD requests do not count against rate limit.
+ 2. Currently, How can we track when an image was last used (to implement eviction based on LRU images)?
+ 3. How will time machine work on expired images?
+ A: Time machine stops images from being garbage collected within a time period. As long as an image is still around and is up-to-date with the upstream registry, Quay will continue serving it.
 
 ## Summary
 
-Dependencies on container images has increased tremendously with the adoption of container driven development. With the introduction of rate limits
+Dependencies on container images have increased tremendously with the adoption of container driven development. With the introduction of rate limits
 on popular container registries, Quay will act as a proxy cache to circumvent pull rate limitation from upstream registries. Adding a cache will also
 accelerate pull performance as images are pulled from cache rather than upstream dependencies. Cached images are updated only when the upstream
-image digest differs from cached image. 
+image digest differs from cached image.
 
 ### Goals
 
-* A Quay user can define and configure(credentials, staleness period) via config file/app, a repository in Quay that acts a cache for a specific upstream registry.
+* A Quay user can define and configure(credentials, expiration) via app, an organization in Quay that acts as a cache for a specific upstream registry.
 * A Quay super can leverage storage quota of an organization to limit cache size. This means when cache size reaches its quota limit,
   images from cache are evicted based on LRU.
 * A proxy cache organization will transparently cache and stream images to client. The images in the proxy cache organization should
@@ -59,7 +61,7 @@ image digest differs from cached image.
 
 * In the first phase, configuring a cache proxy organization, caching upstreaming images, and quota management on cached repositories is the target.
   Other goals will be implemented subsequently based on the work of this proposal.
-* Cached images are read-only, which means that images cannot be pushed into Proxy Cache Organization.
+* ~~Cached images are read-only, which means that images cannot be pushed into Proxy Cache Organization.~~ This is not part of the tech preview - proxy orgs can still receive pushes.
 
 ## Design Details
 
@@ -90,11 +92,13 @@ A user initiates a pulls of an image(say a `postgres:14` image) from an upstream
     ![](https://user-images.githubusercontent.com/11522230/145872216-31350e08-6746-4e34-aebf-e59a7bf6b372.png)
     Design credits: @fmissi
 
-3. If user initiates a pull when the upstream registry which is down:
-  * If the pull happens with the configured staleness period, the image stored in cache is served.
-  * If the pull happens after the configured staleness period, the error is propagated to the user.
+3. If user initiates a pull when the upstream registry is down:
+  * If the pull happens within the configured expiration period, the image stored in cache is served.
+  * If the pull happens after the configured expiration period, the error is propagated to the user.
   * This is depicted as below:
-    ![](https://user-images.githubusercontent.com/11522230/145878373-c23d094b-709d-4859-b875-013ea33e34f7.png)
+
+    ![image](https://user-images.githubusercontent.com/444856/160366569-dfb816dc-1bfd-4ec3-9e4e-08fe892b1e29.png)
+
     Design credits: @fmissi
 
 A quay admin can leverage the configurable size limit of an organization to limit cache size so the backend storage consumption remains predictable
@@ -126,3 +130,4 @@ is beyond the configured size limit, images in the namespace are removed based o
 ### Implementation History
 
 * 2021-12-13 Initial proposal
+* 2022-03-28 Answer a couple open questions, update non-goals
