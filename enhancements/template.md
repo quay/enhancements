@@ -180,6 +180,14 @@ end to end tests.**
 - Announce deprecation and support policy of the existing feature
 - Deprecate the feature
 
+### API Design
+
+If the enhancement uses API endpoints, use this section to document the proposed API endpoints.
+This need not go in to the details. Consider the below high level overview:
+- Proposed path of the endpoints.
+- Permissions required to access the endpoints.
+- The scope of the endpoints (if any).
+
 ### Upgrade / Downgrade Strategy
 
 If applicable, how will the component be upgraded and downgraded? Make sure this
