@@ -85,3 +85,31 @@ defined LDAP entity.
 ## Implementation History
 
 - 2022-07-08 Initial proposal
+
+
+### Implementation
+
+#### Superusers
+
+In addition to current superuser capabilities, this implementation will add the ability for superusers to access contents from outside its permission scope. This is a very specific use case and would only be enabled if the given FEATURE flag is set. This would allow superusers, on top of taking ownership of other namespaces, read, write, and delete contents from other namespaces, without breaking backward compatibility (i.e exising installations should be able to opt-in to get this behavior).
+
+In terms of permission, access to resources not owned by the user would be granted based on whether or not that user has the existing superuser grant (scope) or not. This means that superusers would essentially bypass standard authentication in these cases. TODO: security implications.
+
+#### Restricted Users
+
+Restricted users are a subset of Quay users whose capabilites will be a subset of current regular Quay users (excluding superusers). Some limitations we're going to impose are:
+- Inability to create organizations
+- Inability to write (Feature flagged. Should this be enforced on owner's namespace, or just enforced through quota?)
+- Feature flag/whitelist to default new users as restricted (when not using LDAP, or other federated provider)
+
+Like superusers, restricted users are defined in LDAP using a filter or group. When LDAP is not used, unlike how superusers are defined in a list in Quay's configuration, restricted users are defined based on a provided whitelist (i.e users are defined as restricted unless specified in that configuration list).
+
+When that list is not set, then this feature should implicitly not be enabled (only in the case where LDAP is not used.
+
+#### Configuration
+
+`FEATURE_SUPERUSERS_FULL_ACCESS`: Whether to grant superusers full access no namespaces not owned
+`FEATURE_RESTRICTED_USERS`: Whether to enable restricted users
+`RESTRICTED_USERS_WHITELIST`: Defines the list of users who are not limited by the restricted users' constraints (i.e regular Quay user)
+`LDAP_SUPERUSER_FILTER`: Filter for selecting ldap superusers. Relative to the LDAP_USER_FILTER.
+
