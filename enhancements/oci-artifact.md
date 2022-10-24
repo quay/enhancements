@@ -61,14 +61,14 @@ preparation for fully supporting the referrers API.
 ## Goals
 
 - Support the new OCI Artifact manifest type
-- OCI Artifacts are first-class citizens of Quay, in other words, we do not
+- Support OCI Artifacts as first-class citizens, in other words, we do not
 reuse the `OCIManifest` class
+- Implement references between OCI Artifacts and OCI Images on a database level
 
 ### Non-Goals
 
 - Implement support for the OCI referrers API (will come in a future enhancement)
-- Implement references between OCI Artifacts and OCI Images on the database
-level (also coming in a future enhancement)
+- Solve GC for OCI Images not referenced by any tag
 
 ## Proposal
 
@@ -79,6 +79,13 @@ developers unfamiliar with the code base.
 
 Along with renaming `OCIManifest` we also intrudoce a new `OCIArtifactManifest`
 class, with OCI Artifact specific fields.
+
+To connect an OCI Artifact manifest with an OCI Image manifest this proposal
+suggests reusing the `ManifestChild` table instead of creating a new one.
+The `ManifestChild` table currently stores references between a manifest list
+or OCI Image Index with its sub-manifests (children).
+The idea is to repurpose this table, turning it into a generic way to connect
+two manifests, whatever their type (i.e image manifest or artifact manifest).
 
 ### User Stories [optional]
 
@@ -112,3 +119,14 @@ This story requires the following changes to Quay's GC:
  Artifats that have a relationship to an OCI Image
  * Teach the GC that it should GC OCI Artifacts connected to an OCI Image that
  is about to be GC'd
+
+### Risks and Mitigations
+
+#### Reusing `ManifestChild` table
+
+Although reusing the `ManifestChild` table comes with a lot of advantages, it
+is not without risks.
+Because this table is exclusevily used to express relationships between a
+manifest list (or OCI Image Index) and its sub-manifests (children), there may
+be unforeseen effects to both Quay's UI and code-base.
+The impact on proxy orgs is also currently unknown.
