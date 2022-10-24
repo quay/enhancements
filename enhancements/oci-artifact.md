@@ -82,11 +82,19 @@ class, with OCI Artifact specific fields.
 
 ### User Stories [optional]
 
-#### As an artifact developer I want to successfully push and pull OCI Artifacts to Quay
+#### As an artifact developer I want to push and pull OCI Artifacts to Quay
 
 OCI Artifacts are identified by the `application/vnd.oci.artifact.manifest.v1+json`
 media type. They are also composed of different fields than OCI Images, thus
 Quay should treat them differently when parsing.
+
+#### As a Quay user I want the Quay UI to show which artifacts are connected to my images
+
+To enable future use by the referrers API, the connection between an OCI
+Artifact and an OCI Image (expressed via the `subect` property) must be
+expressed in the database level.
+
+The UI can consume this information via Quay v1 API.
 
 #### As a Quay user I want artifacts in my repository to not get GC'd
 
@@ -94,20 +102,13 @@ Image manifests that do not point to a tag and are not connected to another
 manifest (via `ManifestChild` table, used for manifest lists) are garbage
 collected in Quay.
 
-Artifact manifests do not require tagging.
-Initially, artifact manifests will not be directly connected to Image manifests,
-so keeping them from being GC'd might prove challenging.
+Artifact manifests do not require tagging. Without any changes Quay would
+GC Artifact manifests after the time machine period passes.
 
-The [OCI Distribution Specification](https://github.com/opencontainers/distribution-spec/blob/main/spec.md)
-suggests that for [backwards compatibility](https://github.com/opencontainers/distribution-spec/blob/main/spec.md#backwards-compatibility)
-a special [tag schema](https://github.com/opencontainers/distribution-spec/blob/main/spec.md#referrers-tag-schema)
-be used.
-
-Until Quay is able to keep untagged artifact manifests around Quay can tag
-artifact manifests using this tag schema.
-
-Once relationships between artifact manifests and image manifests are implemented
-on a database level, the GC can be made aware of that and Quay will no longer
-need to rely on the special tag schema to keep artifacts around.
-
-Are OCI Artifacts tagged?
+This story requires the following changes to Quay's GC:
+ * Teach the GC to not garbage collect artifacts that were not deleted
+ * Teach the GC about the relationship between OCI Image manifests and OCI
+ Artifact manifests (via `subject` property) so that it does not GC OCI
+ Artifats that have a relationship to an OCI Image
+ * Teach the GC that it should GC OCI Artifacts connected to an OCI Image that
+ is about to be GC'd
