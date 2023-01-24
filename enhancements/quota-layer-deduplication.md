@@ -63,8 +63,10 @@ TBD
 Quota works by totalling the size of all the blobs under a manifest then writing that total out to a `repositorysize` table. The size is retrieved for reporting and quota enforcement needs. When a push or delete occurs the size is recalculated and written back out to the repository size table. A similar mechanism happens at the namespace level.
 
 If we wanted to get a total of the _individual blobs_ within a repository an intuitive approach is to sum the blob sizes within the following relation. The `manifestblob` table maps manifests to blobs and the `imagestorage` table represents the individual blobs.
+![image](https://user-images.githubusercontent.com/22058392/214327014-4d831c92-b482-4a7c-b342-232becdfe033.png)
 
 and for namespaces:
+![image](https://user-images.githubusercontent.com/22058392/214327032-235650ec-c905-48c6-9eb0-ce6e9f00f574.png)
 
 Directly replacing the current calculation method with summing unique entries in the `imagestorage` table gives us the desired effect, including the size of manifest lists, but does not work at scale. The size of the `manifestblob` and `imagestorage` tables can be in the millions for a single organization. While the sum can be done in milliseconds with thousands of blobs it takes minutes for millions of blobs.
 
