@@ -58,7 +58,7 @@ TBD
 
 #### Context
 
-Quota works by totalling the size of all the blobs under a manifest then writing that total out to a `repositorysize` table. The size is retrieved for reporting and quota enforcement needs. When a push or delete occurs the size is recalculated and written back out to the repository size table. A similar mechanism happens at the namespace level.
+Quota works by totalling the size of all the blobs under a manifest then writing that total out to a `repositorysize` table. The size is retrieved for reporting and quota enforcement needs. When a push or delete occurs the size is re-calculated and written back out to the repository size table. A similar mechanism happens at the namespace level.
 
 If we wanted to get a total of the _individual blobs_ within a repository an intuitive approach is to sum the blob sizes within the following relation. The `manifestblob` table maps manifests to blobs and the `imagestorage` table represents the individual blobs.
 ![image](https://user-images.githubusercontent.com/22058392/214327014-4d831c92-b482-4a7c-b342-232becdfe033.png)
@@ -68,17 +68,17 @@ and for namespaces:
 
 Directly replacing the current calculation method with summing unique entries in the `imagestorage` table gives us the desired effect, including the size of manifest lists, but does not work at scale. The size of the `manifestblob` and `imagestorage` tables can be in the millions for a single organization. This requires more time than can be spent in a single request.
 
-A background job can be used to sum the total asynchronously but will still have issues at scale. When ever a blob is created/deleted the sum is now stale and will need to be recalculated. The time it takes to compute the reported value (time in queue+actual computation) will cause drift from the real value, allowing namespaces/repositories to go beyond their quota limits. 
+A background job can be used to sum the total asynchronously but will still have issues at scale. When ever a blob is created/deleted the sum is now stale and will need to be re-calculated. The time it takes to compute the reported value (time in queue+actual computation) will cause drift from the real value, allowing namespaces/repositories to go beyond their quota limits. 
 
 #### Solution: Using a Running Total
 
-Another approach instead of recalculating the total each time is to keep a running total of the namespace/repository sizes. We can split the calculation of blobs in two phases, backfill and inflight. Backfill will count each pre-existing blob in the registry and the inflight will keep a running total of the blobs in the future. All blobs can be accounted for by using the start time of the backfill.
+Another approach instead of re-calculating the total each time is to keep a running total of the namespace/repository sizes. We can split the calculation of blobs in two phases, backfill and inflight. Backfill will count each pre-existing blob in the registry and the inflight will keep a running total of the blobs in the future. We can use the start time of the backfill as the delimiter between the two. When the backfill has started all existing blobs will be accounted for. Inflight additions/subtractions will start when it sees the backfill has started.
 
 **Backfill** A table `namespacesize` will be added with the columns `namespace_id, size_bytes, backfill_start_ms, backfill_complete`. The backfill runs within an asyncronous worker that discovers namespaces/repositories to run the backfill for. The backfill worker then executes the following steps:
 1. Discover namespaces/repositories to calculate backfill total for
     - Either on demand through queue or background by searching the repository/namespace tables
 2. For each namespace/repository insert the start time of the total into the database under `backfill_start_ms`
-3. Run the total for the namespace/repository using the following queries which account for deduplicating blobs.
+3. Run the total for the namespace/repository using the following queries which accounts for deduplicating blobs.
       ```python
       # Namespace
       derived_ns = (
@@ -102,6 +102,19 @@ Another approach instead of recalculating the total each time is to keep a runni
       ```
 4. Write out the total to `size_bytes` and set `backfill_complete` to `true`
 
+The pseudocode can be as as follows:
+```
+BATCH_SIZE=10
+for $BATCH_SIZE namespace ID's that doesn't exist in namespacesize table:
+    write current time to DB `namespacesize.backfill_start_ms`
+    calculate namespace total 
+    write total size and backfill complete to `namespacesize.size_bytes` and `namespacesize.backfill_complete`
+    for every repository ID that exists under the namespace ID:
+        write current time to DB `repositorysize.backfill_start_ms`
+        calculate repository total
+        write total size and backfill complete to `repositorysize.size_bytes` and `repositorysize.backfill_complete`
+```
+
 **Inflight** To quickly get the new total without re-running the entire sum we can add and subtract the individual blob sizes as manifests are deleted and created. The workflow for addition and subtraction can be as follows:
 
 Addition
@@ -123,6 +136,31 @@ Subtraction
     - If it does not this means this is the last occurence of this blob and it should be subtracted to the total
 
 Using these two totals allows for immediate updates to the namespace/repository sizes at scale. Using a running total also has the risk of becoming out of sync. By setting `backfill_start_ms` to `null` and `backfill_complete` to `false` for a specific namespace/repository the backfill will run again and return with the accurate totals.
+
+The pseudocode can be as as follows:
+```
+# Called on manifest creation or deletion
+namespacetotal=0
+repositorytotal=0
+for (blobid, blobsize) in manifest:
+    if blobid is only one in namespace:
+        namespacetotal = namespacetotal + blobsize
+    if blobid is only one in repository:
+        repositorytotal = repositorytotal + blobsize
+
+if operation is addition:
+    if namespacesize.backfill_start_ms is not null:
+        write out to DB namespacesize.size_bytes + namespacetotal
+    if repositorysize.backfill_start_ms is not null:
+        write out to DB repositorysize.size_bytes + repositorytotal
+else if operation is subtraction:
+    if namespacesize.backfill_start_ms is not null:
+        write out to DB namespacesize.size_bytes - namespacetotal
+    if repositorysize.backfill_start_ms is not null:
+        write out to DB repositorysize.size_bytes - repositorytotal
+```
+
+**Re-running backfill** A known caviat of running totals is drift from between the calculated and real sizes. By setting the `backfill_start_ms: 0` and `backfill_complete: false` the backfill will be re-ran and the totals will be rewritten with the most up to date value.
 
 
 **Reclaimable space**
