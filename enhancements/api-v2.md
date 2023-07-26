@@ -57,11 +57,14 @@ Implement a generic system that is consistent across different endpoints to supp
 It is difficult to say that one pagination strategy suits all needs. After understanding the pros and cons of various pagination strategies, 
 cusor-based pagination seems to work best for our current needs.  
 
+Cursor will contain a unique sequential db column to base cursors on along with additional data when required.
+(Eg: sorting results on non-unique keys, like datetime)
+
 The following will be expected request parameters for an API that is to be paginated:
 1. limit: number of items to be returned for the page, max limit set to 100 items per page (based from current Quay API guidelines).
 2. prev_cursor/next_cursor
 
-    a. prev_cursor: encrypted string fetch previous page results
+    a. prev_cursor: encrypted string to fetch previous page results
 
     b. next_cursor: encrypted string to fetch next page results
 
@@ -77,15 +80,13 @@ Response body:
 }
 ```
 
-Cursor metadata should return a unique sequential column to base cursors on along with additional data when required.
-(Eg: sorting results on non-unique keys, like datetime)
-
 ### Filtering
 
-Typical syntax of an API filter will look like: `key[operation]=<value>` where:
+Typical syntax of an API filter will look like: `key1[operation1]=<value1>&key2[operation2]=<value2>` where:
 - key: is the field on which the search will be performed (Eg: repo name, org name, etc)
 - operation: can be different based on the datatype of the key. (Eg: for integers, `lt|lte|gt|gte`, for strings: `like|eq|regex`)
 - value: is what the query will filter for
+- multiple supported filters can be added to the query parameters using `&`
 
 Eg: (GET `/tags?tag_name[like]=quay`, GET `/logs?created_at[lte]=2023-07-20 19:56`)
 
@@ -117,5 +118,5 @@ They'd need to request pages from 1 - n as next page results are derived from th
 
 ## Open questions
 
-> 1. Do we want to set expiration time on cursors. If yes, how to choose this time? 
+> 1. Do we want to set expiration time on cursors? If yes, how to choose this time?
 
