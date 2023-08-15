@@ -79,9 +79,8 @@ By number of tags:
 
 **Update policy**
 ```
-PATCH /api/v1/organization/{organization}/{repository}/autoprunepolicy
+PATCH /api/v1/organization/{organization}/{repository}/autoprunepolicy/{policyid}
 {
-    policyId: aaabbbcccc1112223333,
     fieldToBeUpdated: value,
 }
 ```
