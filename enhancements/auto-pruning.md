@@ -31,11 +31,11 @@ status: provisional
 
 ## Summary
 
-In order for a container registry to run cost effectively unused resources should be deleted to reclaim storage space. This task should be done automatically in Quay by deleting unused tags through a given policy. The policy used should be configured by the user and a variety policy options should be given. Examples of initial policies would be: prune tags older than X number of days, prune tags when more than 100 are present.
+In order for a container registry to run cost effectively unused resources should be deleted to reclaim storage space. This task should be done automatically in Quay by deleting unused tags through a given policy. The policy used should be configured by the user and a variety policy options should be given. Examples of initial policies would be prune tags older than X number of days or prune tags when more than 100 are present.
 
 ## Motivation
 
-Reclaiming space is essential in running a cost effecient registry. Having this done automatically within Quay removes the need for manual intervention or custom software.
+Reclaiming space is essential in running a cost efficient registry. Having this done automatically within Quay removes the need for manual intervention or custom software.
 
 ### Goals
 
