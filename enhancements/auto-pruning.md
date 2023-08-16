@@ -60,7 +60,7 @@ A user is able to configure auto-pruning within the repository settings. To star
 * Prune by number of tags, provided the number of tags
 * Prune tags older than date, provided the number of days 
 
-For this implementation users will only be able to configure one policy per repository. To interface with this new UI there will a new set of CRUD endpoints for managing auto-pruning policies.
+For this implementation users will only be able to configure one policy per repository. To interface with this new UI there will a new set of CRUD endpoints for managing auto-pruning policies. The endpoints returning lists will be paginated.
 
 **Create policy**
 ```
@@ -85,9 +85,14 @@ PATCH /api/v1/organization/{organization}/{repository}/autoprunepolicy/{policyid
 }
 ```
 
-**List policies**
+**List policies under a repository**
 ```
 GET /api/v1/organization/{organization}/{repository}/autoprunepolicy
+```
+
+**List policies under an organization**
+```
+GET /api/v1/organization/{organization}/autoprunepolicy
 ```
 
 **Get policy**
@@ -106,6 +111,7 @@ A table called `autoprunepolicy` will be used to store the repository auto-prune
 | Field | Datatype | Attributes | Description|
 | --- | ----------- | ----------- | ----------- |
 | uuid | character varying(255) | Unique, not null, indexed | Unique identifier for this policy |
+| organization_id | integer | FK, not null | Organization that the policy falls under |
 | repository_id | integer | FK, not null | Repository that the policy is applied to |
 | config | text | JSON, not null | Policy configuration |
 | last_ran_ms | bigint | nullable, indexed | Last time this policy was executed |
