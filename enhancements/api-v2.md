@@ -1,6 +1,5 @@
 ---
 title: Quay API V2 design
----
 authors:
   - "@sdadi"
 reviewers:
@@ -16,6 +15,7 @@ approvers:
 creation-date: 2023-07-24
 last-updated: yyyy-mm-dd
 status: implementable
+---
 
 # Quay API v2
 
