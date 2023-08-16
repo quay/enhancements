@@ -1,5 +1,6 @@
 ---
 title: Quay API V2 design
+---
 authors:
   - "@sdadi"
 reviewers:
@@ -58,7 +59,14 @@ It is difficult to say that one pagination strategy suits all needs. After under
 cusor-based pagination seems to work best for our current needs.  
 
 Cursor will contain a unique sequential db column to base cursors on along with additional data when required.
-(Eg: sorting results on non-unique keys, like datetime)
+For example, sorting results on non-unique keys, like datetime (currently used in the UI for sorting usage logs)
+
+Cursor data is extensible and can look like:
+```
+{"id": 123}
+{"id": "2023-08-02T12:34:56Z", "offset": 20}
+{"id": "2023-08-02T12:34:56Z", "some_other_key": val1, "another_key": val2}
+```
 
 The following will be expected request parameters for an API that is to be paginated:
 1. limit: number of items to be returned for the page, max limit set to 100 items per page (based from current Quay API guidelines).
@@ -96,6 +104,16 @@ Sort order will be represented by the query parameter `sort`, ascending order by
 Multiple sorts can be passed in the url by adding comma separated keys.
 Eg: (GET `/tags?sort=+created_at`, GET `/users?sort=+creation_date,-last_accessed`)
 
+Sorting will be supported only on select keys. Every API endpoint will maintain a list of supported sortable keys. If a user
+makes a request with an unsupported key, 400 Bad Request response will be sent along with a list of supported sortable keys.
+Example of 400 response:
+```
+{
+    "title": "Unsupported sort key",
+    "detail": "The request is sortable only on one of these keys: [a, b, c]",
+    "status": 400,
+}
+```
 
 ### Notes/Constraints
 
