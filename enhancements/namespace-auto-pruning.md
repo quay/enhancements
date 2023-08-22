@@ -68,12 +68,12 @@ For this implementation users will only be able to configure one policy per name
 POST /api/v1/organization/{organization}/autoprunepolicy
 By date:
 {
-    pruneBy: "creation_date",
+    method: "creation_date",
     olderThan: "2w"  
 }
 By number of tags:
 {
-    pruneBy: "number_of_tags",
+    method: "number_of_tags",
     numTags: 100  
 }
 ```
@@ -106,15 +106,15 @@ Two tables will be required.
 
 **namespaceautoprunepolicy**
 
-This table holds the policy configuration for a single namespace. For this proposal there will be only one entry per namespace but there will be support for multiple rows per namespace_id. The config field will hold the policy details such as `{pruneBy: "creation_date", olderThan: "2w"}` or `{pruneBy: "number_of_tags",  numTags: 100}`.
+This table holds the policy configuration for a single namespace. For this proposal there will be only one entry per namespace but there will be support for multiple rows per namespace_id. The policy field will hold the policy details such as `{method: "creation_date", olderThan: "2w"}` or `{method: "number_of_tags",  numTags: 100}`.
 
 | Field | Datatype | Attributes | Description|
 | --- | ----------- | ----------- | ----------- |
 | uuid | character varying(255) | Unique, not null, indexed | Unique identifier for this policy |
 | namespace_id | integer | FK, not null | Namespace that the policy falls under |
-| config | text | JSON, not null | Policy configuration |
+| policy | text | JSON, not null | Policy configuration |
 
-**autoprunetask**
+**autoprunetaskstatus**
 
 This table registers tasks to be executed by the auto-prune worker. Tasks are executed within the context of a single namespace. Only one task per namespace will ever exist.
 
@@ -123,6 +123,7 @@ This table registers tasks to be executed by the auto-prune worker. Tasks are ex
 | namespace_id | integer | FK, not null | Namespace that this task belongs too |
 | last_ran_ms | bigint | nullable, indexed | Last time the worker executed the policies for this namespace |
 | is_running | boolean | default false | Policies for this namespace are currently being executed |
+| status | text | nullable | Details from the last execution the task |
 
 While these tables could be combined into a single table they are separated to support a `repositoryautoprunepolicy` in the future.
 
@@ -145,7 +146,7 @@ The auto-pruning worker is an asyncronous job that executes configured policies.
 * Get the policy configuration from `namespaceautoprunepolicy`
     * If no policy configuration exists, delete the entry from `autoprunetask` for this namespace and exit immediately
 * Begin a paginated loop of all repositories under the organization
-    * Determine which pruning method to use based on `config.pruneBy`
+    * Determine which pruning method to use based on `policy.method`
     * Execute the pruning method with the policy configuration retrieved earlier
         * For pruning by number of tags the worker will get the number of currently active tags sorted by creation date and delete the oldest tags to the configured number
         * For pruning by date the worker will get the active tags older than the specified time span and any tags returned will be deleted
