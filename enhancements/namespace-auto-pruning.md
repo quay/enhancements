@@ -28,6 +28,7 @@ status: provisional
 1. Should this only be implemented in the new UI and not the old UI?
 1. Can a user configure multiple policies per namespace?
 1. Can a user specify tags or repositories by pattern?
+1. Do we want the ability to have tiered priority for auto-prune execution?
 
 ## Summary
 
