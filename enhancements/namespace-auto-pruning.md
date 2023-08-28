@@ -123,7 +123,6 @@ This table registers tasks to be executed by the auto-prune worker. Tasks are ex
 | --- | ----------- | ----------- | ----------- |
 | namespace_id | integer | FK, not null | Namespace that this task belongs too |
 | last_ran_ms | bigint | nullable, indexed | Last time the worker executed the policies for this namespace |
-| is_running | boolean | default false | Policies for this namespace are currently being executed |
 | status | text | nullable | Details from the last execution the task |
 
 While these tables could be combined into a single table they are separated to support a `repositoryautoprunepolicy` in the future.
@@ -140,10 +139,9 @@ The auto-pruning worker is an asyncronous job that executes configured policies.
 
 **Worker Pseudocode**
 * Worker starts on a set interval (30s)
-* Select a row from `autoprunetask` with the least or null `last_ran_ms` and `is_running`=`false`
+* Select a row from `autoprunetask` with the least or null `last_ran_ms` and `FOR UPDATE SKIP LOCKED`
     * A null `last_ran_ms` indicates that the task was never ran
     * A task that hasn't been ran in the longest amount of time or has never been ran at all are prioritized.
-* Set the task to `is_running` = `true`
 * Get the policy configuration from `namespaceautoprunepolicy`
     * If no policy configuration exists, delete the entry from `autoprunetask` for this namespace and exit immediately
 * Begin a paginated loop of all repositories under the organization
@@ -152,7 +150,7 @@ The auto-pruning worker is an asyncronous job that executes configured policies.
         * For pruning by number of tags the worker will get the number of currently active tags sorted by creation date and delete the oldest tags to the configured number
         * For pruning by date the worker will get the active tags older than the specified time span and any tags returned will be deleted
 * Add audit logs of the tags deleted
-* Set the policy to `is_running` = `false` and update `last_ran_ms` to the current time
+* Update `last_ran_ms` to the current time
 * Worker ends
 
 ### Constraints
