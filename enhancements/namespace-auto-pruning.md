@@ -42,7 +42,6 @@ Reclaiming space is essential in running a cost efficient registry. Having this 
 
 * User is able to provide a time based policy for auto-pruning tags within a namespace
 * User is able to provide a tag number based policy for auto-pruning tags within a namespace
-* User is able to specify whether tags go into the time machine or are immediately deleted
 * The correct tags are deleted when the policy is applied
 * Pruned tags are tracked via usage logs
 
@@ -51,6 +50,7 @@ Reclaiming space is essential in running a cost efficient registry. Having this 
 * Allowing users to specify multiple policies per namespace
 * Applying policies based on repo or tag name pattern matching
 * Allowing policy configurations at the repository level
+* User is able to specify whether tags go into the time machine or are immediately deleted
 
 ## Proposal
 
