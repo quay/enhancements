@@ -153,6 +153,24 @@ The auto-pruning worker is an asyncronous job that executes configured policies.
 * Update `last_ran_ms` to the current time
 * Worker ends
 
+### Future Repository Policies
+
+Repository policies are out of scope of this proposal but are designed with them in mind. Repository policies will include a separate table to store those polices and a revised workflow for the auto-prune worker:
+1. Pulls a row from the `autoprune` table with the least or null `last_ran_ms`
+1. Pull the namespace policy(s) for the namespace
+1. If there exists a namespace policy execute the following
+    1. Start loop of all repositories in the namespace
+    1. Get the repository policy(s) for the repository
+    1. Reconcile and execute the namespace policy(s) and the repository policy(s)
+        1. Here we enforce rules and apply logical operators on which policies get enforced between each level
+        1. How exactly those policies are reconciled will be apart of a future enhancement
+    1. End single loop
+1. Else get all the repository policies under this organization from the `repositoryautoprunepolicy` table
+    1. Loop through each of the repository policies
+    1. Execute the repository policy
+    1. End single loop
+1. If there exists no namespace policy or repository policy, delete the entry from the `autoprune` table
+
 ### Constraints
 
 * The speed at which the background worker can execute the retention policies for large registries
