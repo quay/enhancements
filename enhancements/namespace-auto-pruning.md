@@ -56,11 +56,29 @@ Reclaiming space is essential in running a cost efficient registry. Having this 
 
 The details in this proposal is only for namespace auto-pruning policies but designed in a way to support repository auto-pruning policies in the future. This proposal is structured in three parts: how policies are managed, how the policies are structured in the DB, and how the policies will be executed via the auto-prune worker.
 
+The timeline of feature development is as follows:
+**MVP**
+* Single namespace policies
+* Includes ground work for policy UI, API, and worker
+
+**Short term**
+* Single repository policies
+* Multiple namespace policies
+* Multiple repository policies
+
+**Long term**
+* Repository name pattern matching for namespace policies
+* Tag name pattern matching
+* Additional policies, e.g. By recent pull date  
+* Prune untagged artifacts
+* System wide auto-pruning configuration
+* Dry run policies
+
 ### Managing Policies
 
 A user is able to configure auto-pruning within the namespace settings. To start, there will be two auto-pruning options:
-* Prune by number of tags, provided the number of tags
-* Prune tags older than date, provided the number of days 
+* Prune by number of tags: when the actual number of tags exceed the desired number, the oldest tags will be deleted by creation date until the desired number is achieved
+* Prune tags by creation date: any tags with a creation date older than the given timespan (e.g. 14 days) will be deleted
 
 For this implementation users will only be able to configure one policy per namespace. To interface with this new UI there will be a new set of CRUD endpoints for managing auto-pruning policies. The endpoints returning lists will be paginated.
 
