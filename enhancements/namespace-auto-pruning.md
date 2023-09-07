@@ -8,16 +8,16 @@ reviewers:
 approvers:
   - "@dmage"
   - "@Sunandadadi"
-creation-date: 2023-08-15
-last-updated: 2023-08-15
-status: provisional
+creation-date: 2023-09-07
+last-updated: 2023-09-07
+status: implementable
 ---
 
 # Namespace Auto-pruning Policies
 
 ## Release Signoff Checklist
 
-- [ ] Enhancement is `implementable`
+- [X] Enhancement is `implementable`
 - [ ] Design details are appropriately documented from clear requirements
 - [ ] Test plan is defined
 - [ ] Graduation criteria for dev preview, tech preview, GA
@@ -203,4 +203,4 @@ Repository policies are out of scope of this proposal but are designed with them
 
 ### Implementation History
 
-* 2023-08-15 Initial proposal
+* 2023-09-07 Initial proposal
