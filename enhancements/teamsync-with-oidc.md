@@ -101,7 +101,81 @@ which keeps track of the last time users details were updated. A call is only ma
 | last_updated | DateTimeField | nullable | Last time the user's information was fetched from OIDC system |
 
 **Endpoints in OIDC**
-TBD
+
+*Authorization endpoint*
+
+According to Oauth Authorization code flow, the authorization server sends a temporary (authorization) code to the client. This code is exchanged for a token. This is a secure flow for web applications with a backend that can store credentials securely. The authorization code flow is depicted below:
+![](https://github.com/quay/enhancements/assets/11522230/9967a80b-77ec-44c4-a5d6-6a0667a8392c)
+Picture credits: https://cloudentity.com/developers/basics/oauth-grant-types/authorization-code-flow/
+
+```
+  GET /authorize?
+    response_type=code%20id_token
+    &client_id=<client_id>
+    &redirect_uri=<redirect_uri>
+    &scope=openid profile email
+    &state=af0ifjsldkj
+```
+`state`: Opaque value used to maintain state between the request and the callback.
+
+Example response:
+```
+  HTTP/1.1 302 Found
+  Location: https://server.example.com:8020/oidcclient/redirect/client01
+    code=SplxlOBeZQQYbYS6WxSbIA
+    &state=af0ifjsldkj
+```
+
+*Token endpoint*
+
+The token endpoint is initiated by the client to obtain `ID token`, `access token` and `refresh token`. This endpoint accepts an authorization_code issued to the client by the authorization endpoint. When the authorization code is validated, appropriate tokens returned in response.
+
+```
+  POST /token
+    Content-Type: application/x-www-form-urlencoded
+    Authorization: Basic auth
+
+    grant_type=authorization_code&code=<authorization_code>
+    &redirect_uri=<redirect_uri>
+```
+
+Example response:
+```
+  HTTP/1.1 200 OK
+    Content-Type: application/json
+    {
+     "access_token": "SlAV32hkKG",
+     "token_type": "Bearer",
+     "refresh_token": "8xLOxBtZp8",
+     "expires_in": 3600,
+     "id_token": "eyJ ... zcifQ.ewo ... NzAKfQ.ggW8h ... Mzqg"
+    }
+```
+
+*UserInfo endpoint*
+
+The UserInfo endpoint is a protected resource that returns claims about a user and is authenticated through an `access_token`. The response of the request is returned as a JSON object.
+
+```
+  GET /userinfo
+    Accept: application/x-www-form-urlencoded
+    access_token=<access_token>
+```
+
+Example response:
+
+```
+  HTTP/1.1 200 OK
+    Content-Type: application/json
+   {
+    "sub"          : "bob",
+    "groupIds"     : [ "bobsdepartment","administrators" ],
+    "given_name"   : "Bob",
+    "name"         : "Bob Smith",
+    "email"        : "bob@mycompany.com",
+    "phone_number" : "+1 (604) 555-1234;ext5678"
+   }
+```
 
 ### Constraints
 
