@@ -50,11 +50,10 @@ Support external OIDC Authentication that can be plugged into Quay registry alon
 
 ## Design Details
 
-The workflow of the current proposal revolves around 4 components of Quay:
+The workflow of the current proposal revolves around 3 components of Quay:
 1. Config Tool
 2. UI
 3. Login flow
-4. TeamSync Worker
 
 **Config Tool**
 
@@ -73,32 +72,14 @@ The flowchart for the UI workflow looks as depicted below:
 **Login flow**
 
 This is triggered when the user logins to Quay. Quay's `/signin` page is redirected to the OIDC authentication system. Once a user logins to Quay successfully, a new entry is created for the user in the `FederatedLogin` table. This table
-keeps track of all the users in Quay who are signed in through an external authentication system. The user's OIDC groups are fetched from the `/userinfo` endpoint of the configured OIDC server. For each group a user
+keeps track of all the users in Quay who are signed in through an external authentication system. Now, two main tasks happen:
+
+1. The user's OIDC groups are fetched from the `/userinfo` endpoint of the configured OIDC server. For each group a user
 belongs to, if an entry for the group exists in the `TeamSync` table (i.e., team is syncronized with OIDC group) and if user is not already part of the Quay team, the user gets added to the team.
+2. User's quay teams are fetched. The difference between user's quay teams and user's OIDC groups is calculated. For each team the user belongs to (but not part of OIDC groups) and is part of the `TeamSync` table, the user's team membership for that team is removed.
 
 The flowchart for the Login workflow looks as depicted below:
-![](https://github.com/quay/quay/assets/11522230/c0946ac1-67ee-4a59-abe0-bb4b18576fe8)
-
-**TeamSync Worker**
-
-TeamSync Worker is responsible for keeping the OIDC groups and corresponding quay teams synchronized. It runs at the configured `resycn_interval`. The worker finds stale teams i.e., teams from `TeamSync` table where their last synchronization is more than `resycn_interval`.
-For each team, `FederatedLogin` users part of the team are fetched. `last_updated` column in `FederatedLogin` table will track when the user's information was last fetched. If the last updated time is more than `resycn_interval`, a new API call to
-`/userinfo` endpoint of the OIDC server is made to fetch user details. This information is then used to update the teams that a user is part of. Lastly, user is removed from all the teams from `TeamSync` table that a user is a part of, but the team does not exist in users OIDC groups.
-
-The flowchart for the TeamSync Worker looks as depicted below:
-![](https://github.com/quay/quay/assets/11522230/d9e4e3a3-3eb2-45f2-96eb-0c2b1090cd2a)
-
-### Implementation Details
-
-**Database schema change to add `last_updated` column to `FederatedLogin` table**
-
-OIDC does not have an endpoint to fetch users that belong to a group. Instead, the `/userinfo` endpoint is used to fetch the groups a user belongs to. When the TeamSync worker runs, in order to make sure that the teams are synced with the OIDC groups, a users OIDC groups
-are fetched using the `/userinfo` endpoint, and the user's quay teams membership is updated. When a user belongs to multiple OIDC groups, `/userinfo` endpoint is initiated multiple times. This is prevented with the `last_updated` column
-which keeps track of the last time users details were updated. A call is only made when `timedelta(current_time, last_updated) > sync_interval`.
-
-| Field | Datatype | Attributes | Description |
-| --- | ----------- | ----------- | ----------- |
-| last_updated | DateTimeField | nullable | Last time the user's information was fetched from OIDC system |
+![](https://github.com/quay/enhancements/assets/11522230/1fcdabf6-a052-4873-9721-1dda4fc2b81d)
 
 **Endpoints in OIDC**
 
@@ -179,8 +160,8 @@ Example response:
 
 ### Constraints
 
-* OIDC groups are not synced until the worker runs and the team and user's `last_updated > sync_interval`.
-* If a user is deleted from OIDC system, the users team membership is updated but the user still persists in Quay.
+* OIDC groups are synced only when a user performs a fresh signin.
+* If a user is deleted from OIDC system, there is no way to remove user's team membership from quay.
 
 ### Risks and Mitigations
 
