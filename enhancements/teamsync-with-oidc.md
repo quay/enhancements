@@ -57,9 +57,27 @@ The workflow of the current proposal revolves around 3 components of Quay:
 
 **Config Tool**
 
-In the Quay Config tool, configuration to connect with the OIDC system can be set up. If `LDAP` or `OIDC` is selected as the external authentication systems, there is an option to choose team Synchronization using the configured provider.
-Other team Synchronization details like resynchronization duration, allowing non-super to enable and mange team syncing can be configured in the tool as well. If the feature `FEATURE_TEAM_SYNCING` is set to `True` and external
-authentication is set to `LDAP` or `OIDC` and is successfully validated, the below workflows kicks in.
+The config for connecting with an external OIDC server looks as below:
+
+```
+  OIDC_LOGIN_CONFIG:
+    CLIENT_ID: <client-id>
+    CLIENT_SECRET: <client-secret>
+    OIDC_SERVER: http://<host_address>/realms/<realm_name>/
+    SERVICE_NAME: <name_of_service>
+    LOGIN_SCOPES: ['openid']
+```
+
+When quay starts, the config-tool verifies if quay was able to successfully connect to the OIDC server. If there is any issue reaching to the server, an error is displayed in the quay container logs.
+
+Team Synchronization details can be set up using the below parameters:
+
+```
+    FEATURE_TEAM_SYNCING: boolean (enables team synchronization with the set up OIDC provider)
+    FEATURE_NONSUPERUSER_TEAM_SYNCING_SETUP: boolean (enables non-superusers to setup team sync)
+```
+
+Quay will start only if config-tool verification passes. Once quay starts, the below workflow kicks in.
 
 **UI**
 
