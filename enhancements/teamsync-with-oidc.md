@@ -96,7 +96,7 @@ keeps track of all the users in Quay who are signed in through an external authe
 
 1. The user's OIDC groups are fetched from the `/userinfo` endpoint of the configured OIDC server. For each group a user
 belongs to, if an entry for the group exists in the `TeamSync` table (i.e., team is syncronized with OIDC group) and if user is not already part of the Quay team, the user gets added to the team.
-2. User's quay teams are fetched. The difference between user's quay teams and user's OIDC groups is calculated. For each team the user belongs to (but not part of OIDC groups) and is part of the `TeamSync` table, the user's team membership for that team is removed.
+2. User's quay teams are fetched. The difference between user's quay teams that are synced with an OIDC group and user's OIDC groups returned from `/userinfo` endpoint is calculated. User is removed from the teams that are synced with OIDC groups and those OIDC group does not exist in the groups list returned from `/userinfo` endpoint.
 
 The flowchart for the Login workflow looks as depicted below:
 ![](https://github.com/quay/enhancements/assets/11522230/1fcdabf6-a052-4873-9721-1dda4fc2b81d)
@@ -182,6 +182,7 @@ Example response:
 
 * OIDC groups are synced only when a user performs a fresh signin.
 * If a user is deleted from OIDC system, there is no way to remove user's team membership from quay.
+* Currently, we do not have any mechanism to verify if a group name exists on the OIDC server. So, if an incorrect group name is entered, it is expected that users will not belong to the corresponding quay team.
 
 ### Risks and Mitigations
 
