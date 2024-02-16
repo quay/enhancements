@@ -65,12 +65,12 @@ The config for connecting with an external OIDC server looks as below:
     CLIENT_SECRET: <client-secret>
     OIDC_SERVER: http://<host_address>/realms/<realm_name>/
     SERVICE_NAME: <name_of_service>
-    GROUP_CLAIM_NAME: groupIds
+    PREFERRED_GROUP_CLAIM_NAME: groupIds
     LOGIN_SCOPES: ['openid']
 ```
 
 When quay starts, the config-tool verifies if quay was able to successfully connect to the OIDC server. If there is any issue reaching to the server, an error is displayed in the quay container logs.
-Since different auth providers have a different key name that holds the list of groups a user is part of, this is a configurable parameter. `GROUP_CLAIM_NAME` holds the key name that is expected to hold the information for groups.
+Since different auth providers have a different key name that holds the list of groups a user is part of, this is a configurable parameter. `PREFERRED_GROUP_CLAIM_NAME` holds the key name that is expected to hold the information for groups.
 
 Team Synchronization details can be set up using the below parameters:
 
@@ -85,6 +85,7 @@ Quay will start only if config-tool verification passes. Once quay starts, the b
 
 When the user visits a team page at `/organization/<orgname>/teams/<teamname>`, a user can enable or disable team synchronization from the UI. If team synchronization is enabled, additional details of the OIDC group that needs to be synced with the team is entered.
 Once the group details are configured and verified, the team page enters into a read-only state since the team memberships are now controlled through the OIDC server. The membership of users who are already part of the team is revoked. OIDC will be the single source of truth.
+The OIDC group name needs to follow the format - `<org_name>:<team_name>`. (Eg: `devops:engineering` - this means users will be added to `engineering` team in the `devops` org).
 
 The flowchart for the UI workflow looks as depicted below:
 ![](https://github.com/quay/quay/assets/11522230/89ee41de-9be5-4fd0-a462-8cd54504648f)
