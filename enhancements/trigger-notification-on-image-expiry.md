@@ -34,7 +34,8 @@ This feature generates an event that can notify user when an image expires.
 * Allow users to set up notifications for images expiring in x days (any between 1-30).
 * Support notifications via email, Slack webhooks, and etc
 * These notifications can be configured at the repository level
-* All types of image expiration should be captured (including org-level/repo-level auto-prune policies) 
+* A single notification containing a list of all tags for the repository is to be sent
+* All types of image expiration should be captured (including org-level/repo-level auto-prune policies)
 
 ## Design Details
 
@@ -67,7 +68,7 @@ identify `RepositoryNotification` entries that will trigger notifications on ima
 **Worker Pseudocode**
 
 * Worker starts on a set interval
-* Select a row from `ExternalNotificationEvent` where `event = "repo_image_expiry" & number_of_failures < 3` and `FOR UPDATE SKIP LOCKED`
+* Select a row from `RepositoryNotification` where `event = "repo_image_expiry" & number_of_failures < 3` and `FOR UPDATE SKIP LOCKED`
   * null `eventConfig.last_ran_ms` indicates that the task was never ran
   * `number_of_failures` indicates failure by the notificationworker queue  
   * sort query response by `eventConfig.last_ran_ms` asc to prioritize tasks that were never ran or did not run in the longest time
