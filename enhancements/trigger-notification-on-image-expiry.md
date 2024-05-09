@@ -84,11 +84,11 @@ Add a new column - `last_ran_ms` to the `RepositoryNotification` table to track 
 | --- | ----------- | ----------- | ----------- |
 | last_ran_ms | bigint | nullable | Last time NotificationWorker processed the row |
 
-### Image-expiry worker
+### Worker
 
-**Worker Pseudocode**
+**Pseudocode**
 
-* Worker starts on a set interval
+* GC Worker starts on set interval
 * Select a row from `RepositoryNotification` where `event = "repo_image_expiry" & number_of_failures < 3` and `FOR UPDATE SKIP LOCKED`
   * null `last_ran_ms` indicates that the task was never ran
   * `number_of_failures` indicates failure by the notificationworker queue  
@@ -103,6 +103,8 @@ Add a new column - `last_ran_ms` to the `RepositoryNotification` table to track 
 * Else:
   * Update `event.last_ran_ms` to the current time
 * worker ends
+
+This will run as a part of the gc worker to reduce creating more workers.
 
 ### NotificationWorker queue
 
