@@ -64,7 +64,7 @@ identify `RepositoryNotification` entries that will trigger notifications on ima
 
 A new table will be added to track tags that were successfully notified.
 
-**tagNotificationSent**
+**tagNotificationSuccess**
 
 A new entry is added to this table when a notification was sent for a tag. In the future runs of the imageexpiry worker,
 this table is used to filter remaining tags for a repository that need to be notified.
@@ -72,8 +72,8 @@ this table is used to filter remaining tags for a repository that need to be not
 | Field | Datatype | Attributes | Description|
 | --- | ----------- | ----------- | ----------- |
 | id | integer | Unique, not null, auto increment | Unique identifier for the table |
-| notification_id | integer | FK, not null | RepositoryNotification.id |
-| tag_id | integer | FK, not null | Tag.id |
+| notification_id | integer | FK, indexed, not null | RepositoryNotification.id |
+| tag_id | integer | FK, indexed, not null | Tag.id |
 | method_id | inter | FK, not null | RepositoryNotification.method |
 
 * When a notification or tag is deleted, the corresponding row in this table needs to be deleted.
@@ -102,11 +102,11 @@ Add a new column - `last_ran_ms` to the `RepositoryNotification` table to track 
   * belong to the same repository as the configured notificationEvent, and
   * tag is expiring within configured notificationEvent days
   * include tags expiry due to org-level/repo-level auto-prune policies
-  * tag does not belong to `tagnotificationsent` table for the notification method
+  * tag does not belong to `tagnotificationsuccess` table for the notification method
 * If count of tags > 0:
   * push event into notificationworker queue with list of tags
   * for each tag:
-    * create entry in `tagnotificationsent`
+    * create entry in `tagnotificationsuccess`
 * Else:
   *  return
 * worker ends
