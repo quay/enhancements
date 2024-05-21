@@ -51,9 +51,9 @@ POST /api/v1/repository/<apirepopath:repository>/notification/
   "method": "slack",
   "title": "Image(s) in test repository will expire in 5 days",
   "eventConfig": {
-    "days" : "5" (supported values: 1 to 30),
+    "days" : 5, # (supported values: 1 to 30)
   },
-  "last_ran_ms": null # last time the worker executed this event
+  "last_ran_ms": null, # last time the worker executed this event
 }
 ```
 
@@ -76,6 +76,10 @@ this table is used to filter remaining tags for a repository that need to be not
 | tag_id | integer | FK, not null | Tag.id |
 | method_id | inter | FK, not null | RepositoryNotification.method |
 
+* When a notification or tag is deleted, the corresponding row in this table needs to be deleted.
+* When a tag expires(either manually or by the auto-prune worker) or when the expiry of the tag is updated, the corresponding
+rows in this table need to be deleted. This allows for new notifications to be sent for the tag with the updated expiry.
+
 **RepositoryNotification**
 
 Add a new column - `last_ran_ms` to the `RepositoryNotification` table to track when a notification was last processed by the `NotificationWorker`.
@@ -93,15 +97,18 @@ Add a new column - `last_ran_ms` to the `RepositoryNotification` table to track 
   * null `last_ran_ms` indicates that the task was never ran
   * `number_of_failures` indicates failure by the notificationworker queue  
   * sort query response by `last_ran_ms` asc to prioritize tasks that were never ran or did not run in the longest time
+* Update `event.last_ran_ms` to the current time to release lock
 * Get the count of tags that
   * belong to the same repository as the configured notificationEvent, and
   * tag is expiring within configured notificationEvent days
   * include tags expiry due to org-level/repo-level auto-prune policies
   * tag does not belong to `tagnotificationsent` table for the notification method
 * If count of tags > 0:
-  * push event into notificationworker queue
+  * push event into notificationworker queue with list of tags
+  * for each tag:
+    * create entry in `tagnotificationsent`
 * Else:
-  * Update `event.last_ran_ms` to the current time
+  *  return
 * worker ends
 
 This will run as a part of the gc worker to reduce creating more workers.
