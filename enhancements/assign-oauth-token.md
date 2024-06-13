@@ -12,15 +12,15 @@ approvers:
   - "@syed"
 creation-date: 2024-16-05
 last-updated: 2024-16-05
-status: proposed
+status: implementable
 ---
 
 # Oauth Token Assignment 
 
 ## Release Signoff Checklist
 
-- [ ] Enhancement is `implementable`
-- [ ] Design details are appropriately documented from clear requirements
+- [x] Enhancement is `implementable`
+- [x] Design details are appropriately documented from clear requirements
 - [ ] Test plan is defined
 - [ ] Graduation criteria for dev preview, tech preview, GA
 
@@ -49,7 +49,7 @@ This will allow assignment of oauth tokens so the correct user will appear in th
 
 In the application view when creating a token there will be a new entity select field that will allow them to select a user to assign the token. This field will only allow users to be selected, not robots or organizations. Any user within the Quay registry can be selected for assignment.
 
-[select-user-image]
+<img width="706" alt="image" src="https://github.com/bcaton85/enhancements/assets/22058392/25c263e0-28e3-4099-b100-d3bec46b75db">
 
 When a different user is chosen, the button will change to `Assign token` and a confirmation modal listing the scopes and assigned user will appear on button click. On confirmation the `POST /oauth/authorize/assignuser` endpoint will be called.
 
@@ -123,19 +123,18 @@ response:
 
 Currently in the Angular UI under User settings > External logins and authorizations > Authorized Applications there exists the list of authorized applications on behalf of the user. Within this same view a call will be made to `GET /v1/user/assignedauthorizations` that will list the assigned authorizations within the same table. Each field will be the same as the other entries with the exception of a new column `Approve` which will give the option to `Authorize application` for each assigned authorization row.
 
-[authorize-app-via-assigned-user-image]
+<img width="1263" alt="image" src="https://github.com/bcaton85/enhancements/assets/22058392/71b7b203-f257-4dc9-8d38-3a86e1dfc58e">
 
 Selecting that option brings them through the normal app authorization flow. If they are being granted scopes that are greater than they currently have, a screen will appear confirming the scopes begin granted. A depication of this flow can be seen below with new functionality being highlighted in yellow.
 
-[oauth-flow]
+![image](https://github.com/bcaton85/enhancements/assets/22058392/927842b8-cf24-4564-8c1c-2881e50978aa)
 
 When selecting `Authorize application` this flow will execute with the addition of the `assignment_uuid` parameter. This indicates to the oauth flow that the token is being created as a part of an authorization assignment. Both the `/oauth/authorize` and `/oauth/authorizeapp` endpoints will check whether the current user is an admin and if not verify the current user exists in the `oauthtokenassignment` table matching the given `assignment_uuid`. If this succeeds, when the token is generated it will also delete the row in the `oauthtokenassignment` table matching the `assignment_uuid` as the token has been succesfully assigned and the user shouldn't be able to generate another token. Screen shots of the flow can be found below.
 
 Confirming the scopes after clicking `Authorize application`:
-[scope confirmation]
+<img width="694" alt="image" src="https://github.com/bcaton85/enhancements/assets/22058392/65e1e110-5313-41db-8918-b37a7631ebbc">
 
-Displays the token once:
-[token-display]
+Afterward the token will be displayed once.
 
 On user or application deletion the corresponding rows in the `oauthtokenassignment` will also be deleted.
 
