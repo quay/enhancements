@@ -302,31 +302,6 @@ def aggregate_pull_events(redis_batch):
     
     return tag_updates, manifest_updates
 
-def bulk_upsert_tag_statistics(tag_updates):
-    """Bulk upsert tag statistics ON CONFLICT"""
-    if not tag_updates:
-        return
-        
-    values = []
-    for update in tag_updates:
-        values.append(f"({update['repository_id']}, '{update['tag_name']}', "
-                     f"'{update['manifest_digest']}', {update['pull_count']}, "
-                     f"'{update['last_pull']}', NOW())")
-    
-    sql = f"""
-    INSERT INTO TagPullStatistics 
-        (repository_id, tag_name, current_manifest_digest, tag_pull_count, 
-         last_tag_pull_date, redis_last_processed)
-    VALUES {','.join(values)}
-    ON CONFLICT (repository_id, tag_name) 
-    DO UPDATE SET
-        current_manifest_digest = EXCLUDED.current_manifest_digest,
-        tag_pull_count = TagPullStatistics.tag_pull_count + EXCLUDED.tag_pull_count,
-        last_tag_pull_date = GREATEST(TagPullStatistics.last_tag_pull_date, EXCLUDED.last_tag_pull_date),
-        redis_last_processed = EXCLUDED.redis_last_processed
-    """
-    execute(sql)
-
 **Example: Processing Multiple Tag+Repo+Digest Combinations**
 
 During a 5-minute Redis flush cycle, the worker processes different combinations:
@@ -373,21 +348,6 @@ INSERT INTO TagPullStatistics (...) VALUES
 ON CONFLICT (repository_id, tag_name) DO UPDATE SET ...
 ```
 
-### Bulk Upsert Performance Benefits
-
-**Performance Comparison:**
-```
-Individual Operations:
-- 1000 Redis keys = 1000 database queries
-- Time: ~5-10 seconds (network overhead)
-- Database load: High (connection pool exhaustion)
-
-Bulk Operations:  
-- 1000 Redis keys = 2 database queries (tags + manifests)
-- Time: ~100-200ms
-- Database load: Low (minimal connections)
-```
-
 ### Database Schema Enhancements
 
 The Redis approach leverages the same database tables as Approach 1 but with optimized bulk update patterns:
@@ -418,17 +378,6 @@ ADD COLUMN redis_last_processed DATETIME;
 -- Add to existing ManifestPullStatistics table  
 ALTER TABLE ManifestPullStatistics 
 ADD COLUMN redis_last_processed DATETIME;
-
--- New table for tracking Redis processing state
-CREATE TABLE RedisProcessingState (
-    id BIGINT PRIMARY KEY AUTO_INCREMENT,
-    last_processed_timestamp DATETIME NOT NULL,
-    processing_status ENUM('IDLE', 'PROCESSING', 'ERROR') DEFAULT 'IDLE',
-    error_message TEXT,
-    keys_processed_count BIGINT DEFAULT 0,
-    created_at DATETIME DEFAULT NOW(),
-    updated_at DATETIME DEFAULT NOW() ON UPDATE NOW()
-);
 ```
 
 ### Integration with Pull Endpoints
