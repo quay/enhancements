@@ -60,9 +60,12 @@ Provide insight into popularity of an image tag by recording the last pull date/
 
 ## Proposal
 
-The proposal details two approaches:
-1. Using existing Quay's log model
-2. Using redis 
+This enhancement proposes two different approaches for implementing last pull metrics tracking, each with distinct trade-offs:
+
+1. **Approach 1 - Audit Log Processing**: Leverages existing Quay audit logs with background workers for zero pull request impact
+2. **Approach 2 - Redis-backed Tracking**: Uses Redis for real-time event capture with periodic database synchronization for better data freshness
+
+Both approaches provide the same core functionality but differ in implementation complexity, infrastructure requirements, and data freshness guarantees. 
 
 ## Design Approach 1: Using existing quay's log model to track last pull events
 
@@ -184,6 +187,274 @@ The feature is gated behind `FEATURE_PULL_STATISTICS_TRACKING` to allow safe rol
 * Integration tests for API endpoints
 * Performance testing with high-volume pull workloads
 * Validation of tag vs manifest pull count accuracy
+
+## Design Approach 2: Redis-backed Pull Events Tracking
+
+This approach implements real-time pull metrics tracking by capturing pull events directly in Redis and asynchronously flushing to a persistent database. This provides better performance and lower latency for pull statistics updates.
+
+```
+Pull Events → Redis Cache → Background Worker → Persistent Database
+     ↓             ↓              ↓                    ↓
+Real-time      Temporary        Periodic          Long-term
+capture        storage          aggregation       storage
+```
+
+### Implementation Approach
+
+**Real-time Event Capture**: Pull events are immediately captured in Redis during image fetch operations (both by tag and by digest), providing near real-time tracking without impacting pull performance.
+
+**Benefits**:
+- Near real-time pull statistics updates
+- High performance with minimal impact on pull requests
+- Resilient to temporary database unavailability
+- Natural batching and deduplication through Redis structures
+- Lower database load through periodic bulk operations
+
+### Redis Data Structure
+
+**Pull Event Keys**: Each pull event is stored in Redis with a unique key structure that allows for efficient querying and aggregation.
+
+**Key Format**:
+```
+pull_events:repo:{repository_id}:tag:{tag_name}:{manifest_digest}
+pull_events:repo:{repository_id}:digest:{manifest_digest}
+```
+
+**Redis Data Structure** (Hash for each key):
+```json
+{
+  "repository_id": "123",
+  "tag_name": "v1.0",           // Only for tag pulls
+  "manifest_digest": "sha256:abc123...",
+  "pull_count": "5",            // Incremented on each pull
+  "last_pull_timestamp": "1694168400",
+  "pull_method": "tag|digest"   // How the image was pulled
+}
+```
+
+**Redis Operations**:
+- **Tag Pull**: Creates/updates key `pull_events:repo:{repo_id}:tag:{tag}:{digest}`
+- **Digest Pull**: Creates/updates key `pull_events:repo:{repo_id}:digest:{digest}`
+- **Atomic Updates**: Uses Redis HINCRBY and HSET for thread-safe increments
+    - HINCRBY: increments the numeric value of a hash field by the specified amount
+    - HSET: Sets a field-value pair in the hash
+
+### Background Worker: RedisFlushWorker
+
+**RedisFlushWorker**: A background service that periodically processes Redis pull events and flushes them to the persistent database.
+
+**Processing Logic**:
+1. **Scan Redis Keys**: Uses Redis SCAN to iterate through all `pull_events:*` keys
+2. **Batch Processing**: Processes keys in batches of 1000 to avoid memory issues
+3. **Aggregate Statistics**: For each repository, aggregates pull counts and timestamps
+4. **Database Update**: Performs bulk upsert operations with dual update logic:
+   - **Tag pulls**: Update both TagPullStatistics (tag-specific) AND ManifestPullStatistics (manifest-level)
+   - **Digest pulls**: Update only ManifestPullStatistics (no tag involved)
+5. **Cleanup**: Removes processed keys from Redis after successful database commit
+6. **Error Handling**: Retains Redis keys on database failures for retry
+
+**Configuration**:
+- Flush interval: 5 minutes (configurable via `REDIS_FLUSH_INTERVAL_SECONDS`)
+- Batch size: 1000 keys per processing cycle
+- Redis key TTL: 1 hour (backup cleanup if worker fails)
+- Retry attempts: 3 with exponential backoff
+
+**Processing Flow**:
+```python
+def process_redis_events():
+    for batch in scan_redis_keys("pull_events:*", batch_size=1000):
+        tag_updates, manifest_updates = aggregate_pull_events(batch)
+        try:
+            # Tag pulls update both tables, digest pulls update only manifest table
+            if tag_updates:
+                bulk_upsert_tag_statistics(tag_updates)
+            if manifest_updates:
+                bulk_upsert_manifest_statistics(manifest_updates)
+            cleanup_redis_keys(batch)
+        except DatabaseError:
+            # Keys remain in Redis for next cycle
+            log_error_and_continue()
+
+def aggregate_pull_events(redis_batch):
+    tag_updates = []
+    manifest_updates = []
+    
+    for key, data in redis_batch:
+        # Always update manifest stats (both tag and digest pulls)
+        manifest_updates.append({
+            'repository_id': data['repository_id'],
+            'manifest_digest': data['manifest_digest'],
+            'pull_count': data['pull_count'],
+            'last_pull': data['last_pull_timestamp']
+        })
+        
+        # Additionally update tag stats for tag pulls
+        if data['pull_method'] == 'tag':
+            tag_updates.append({
+                'repository_id': data['repository_id'],
+                'tag_name': data['tag_name'],
+                'manifest_digest': data['manifest_digest'],
+                'pull_count': data['pull_count'],
+                'last_pull': data['last_pull_timestamp']
+            })
+    
+    return tag_updates, manifest_updates
+```
+
+### Database Schema Enhancements
+
+The Redis approach leverages the same database tables as Approach 1 but with optimized bulk update patterns:
+
+**Enhanced TagPullStatistics Table**:
+- Adds `redis_last_processed` timestamp for tracking Redis sync state
+- Uses bulk UPSERT operations for efficient batch updates
+- Updated only when image is pulled by tag name
+
+**Enhanced ManifestPullStatistics Table**:
+- Adds `redis_last_processed` timestamp
+- Optimized for high-frequency bulk updates
+- Updated for ALL pull operations (both tag pulls and direct digest pulls)
+
+**Update Logic**:
+- **Tag Pull** (`docker pull repo:tag`): Updates BOTH TagPullStatistics (for the tag) AND ManifestPullStatistics (for the underlying manifest)
+- **Digest Pull** (`docker pull repo@sha256:abc...`): Updates ONLY ManifestPullStatistics (no specific tag involved)
+
+This ensures that manifest-level statistics accurately reflect the total usage of the underlying image content, regardless of how it was accessed.
+
+**New RedisProcessingState Table**:
+| Field | Type | Description |
+|-------|------|-------------|
+| id | PK | Auto-increment primary key |
+| last_processed_timestamp | datetime | Last successful Redis processing time |
+| processing_status | enum | IDLE, PROCESSING, ERROR |
+| error_message | text | Last error details (if any) |
+| keys_processed_count | bigint | Count of Redis keys processed in last cycle |
+
+### Integration with Pull Endpoints
+
+**Minimal Code Changes**: Pull endpoints are enhanced with lightweight Redis operations:
+
+```python
+def record_pull_event(repository_id, tag_name=None, manifest_digest=None):
+    if not feature_flag_enabled("FEATURE_REDIS_PULL_TRACKING"):
+        return
+        
+    if tag_name:
+        key = f"pull_events:repo:{repository_id}:tag:{tag_name}:{manifest_digest}"
+        pull_method = "tag"
+    else:
+        key = f"pull_events:repo:{repository_id}:digest:{manifest_digest}"
+        pull_method = "digest"
+    
+    redis_client.hmset(key, {
+        "repository_id": repository_id,
+        "tag_name": tag_name or "",
+        "manifest_digest": manifest_digest,
+        "pull_count": 1,
+        "last_pull_timestamp": int(time.time()),
+        "pull_method": pull_method
+    })
+    redis_client.hincrby(key, "pull_count", 1)
+    redis_client.expire(key, 3600)  # 1 hour TTL as backup
+```
+
+### API Endpoints
+
+Uses the same API endpoints as Approach 1 but with faster data availability:
+
+- Statistics are updated within 5 minutes of pull events
+- Real-time counters available via Redis for immediate queries (optional endpoint)
+- Fallback to database for historical data when Redis keys expire
+
+**Optional Real-time Endpoint**:
+```
+GET /api/v1/repository/{repository}/pull_statistics/realtime
+Response: Current Redis-based statistics (last 5 minutes)
+```
+
+### Monitoring and Observability
+
+**Metrics to Track**:
+- Redis key count and memory usage
+- Worker processing latency and throughput
+- Database bulk operation performance
+- Failed Redis-to-database sync events
+
+**Health Checks**:
+- Redis connectivity and memory usage
+- Worker processing delays
+- Database sync lag monitoring
+
+### Constraints and Considerations
+
+**Redis Memory Usage**:
+- Estimated 200 bytes per unique pull event
+- For 1M repositories with 10 tags each: ~2GB Redis memory
+- TTL-based cleanup prevents unbounded growth
+
+**Processing Guarantees**:
+- At-least-once delivery (Redis keys may be reprocessed on worker failures)
+- Eventually consistent statistics (5-minute delay maximum)
+- Duplicate pull event protection through Redis key structure
+
+**Performance Impact**:
+- Redis operations add ~1-2ms to pull request latency
+- Minimal database load through batching
+- Worker processing scales with Redis memory, not pull volume
+
+### Failure Scenarios and Recovery
+
+**Redis Unavailable**:
+- Pull requests continue without statistics tracking
+- Worker queues database operations for catch-up
+- Feature flag allows disabling Redis integration
+
+**Database Unavailable**:
+- Redis continues collecting events
+- Worker retries with exponential backoff
+- Extended Redis TTL prevents data loss
+
+**Worker Failures**:
+- Redis keys persist with TTL for recovery
+- Processing state table tracks last successful sync
+- Automatic restart picks up from last known state
+
+### Comparison with Approach 1
+
+| Aspect | Approach 1 (Audit Logs) | Approach 2 (Redis) |
+|--------|--------------------------|---------------------|
+| Data Freshness | 5-minute delay | Near real-time |
+| Pull Request Impact | Zero | Minimal (~1-2ms) |
+| Infrastructure | Existing logs only | Redis + Database |
+| Memory Usage | Low | Moderate (Redis) |
+| Failure Recovery | Log reprocessing | Redis persistence |
+| Scalability | Limited by log volume | High (Redis scales) |
+| Historical Data | Full audit trail | Recent events only |
+
+### Test Plan
+
+**Unit Tests**:
+- Redis operations for tag and digest pulls
+- Worker batch processing logic
+- Database bulk update operations
+- Error handling and retry mechanisms
+
+**Integration Tests**:
+- End-to-end pull event tracking
+- Redis-to-database synchronization
+- API endpoint accuracy with Redis data
+- Failure scenario recovery
+
+**Performance Tests**:
+- High-volume pull request impact
+- Redis memory usage under load
+- Worker processing throughput
+- Database bulk operation efficiency
+
+**Load Testing**:
+- 10,000+ concurrent pulls with Redis tracking
+- Redis memory usage with 1M+ active keys
+- Worker performance with large Redis datasets
 
 ### Implementation History
 
