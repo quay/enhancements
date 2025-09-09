@@ -462,7 +462,14 @@ Uses the same API endpoints as Approach 1 but with faster data availability:
 - Processing state table tracks last successful sync
 - Automatic restart picks up from last known state
 
-### Comparison with Approach 1
+### Test Plan
+
+* Unit tests for worker log processing logic
+* Integration tests for API endpoints
+* Performance testing with high-volume pull workloads
+* Validation of tag vs manifest pull count accuracy
+
+## Comparison of two approaches
 
 | Aspect | Approach 1 (Audit Logs) | Approach 2 (Redis) |
 |--------|--------------------------|---------------------|
@@ -474,31 +481,6 @@ Uses the same API endpoints as Approach 1 but with faster data availability:
 | Scalability | Limited by log volume | High (Redis scales) |
 | Historical Data | Full audit trail | Recent events only |
   - Latency: 10-50ms per query on elastic search vs <1ms for Redis
-
-### Test Plan
-
-**Unit Tests**:
-- Redis operations for tag and digest pulls
-- Worker batch processing logic
-- Database bulk update operations
-- Error handling and retry mechanisms
-
-**Integration Tests**:
-- End-to-end pull event tracking
-- Redis-to-database synchronization
-- API endpoint accuracy with Redis data
-- Failure scenario recovery
-
-**Performance Tests**:
-- High-volume pull request impact
-- Redis memory usage under load
-- Worker processing throughput
-- Database bulk operation efficiency
-
-**Load Testing**:
-- 10,000+ concurrent pulls with Redis tracking
-- Redis memory usage with 1M+ active keys
-- Worker performance with large Redis datasets
 
 ### Implementation History
 
