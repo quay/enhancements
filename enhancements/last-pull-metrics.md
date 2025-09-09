@@ -86,7 +86,6 @@ Pull Events → Audit Logs (existing) → Background Worker → New PullStatisti
 - Zero impact on pull request performance 
 - Works around expensive/inaccessible logs issue
 - Handles historical data by processing old logs
-- Can recover gracefully from logs access issues
 
 ### Database Schema
 
@@ -136,12 +135,6 @@ Pull Events → Audit Logs (existing) → Background Worker → New PullStatisti
 
 ### API Endpoints
 
-**Repository Pull Statistics**
-```
-GET /api/v1/repository/{repository}/pull_statistics
-Response: List of all tag statistics and manifest statistics for the repository
-```
-
 **Tag Pull Statistics**  
 ```
 GET /api/v1/repository/{repository}/tag/{tagname}/pull_statistics
@@ -170,16 +163,16 @@ The feature is gated behind `FEATURE_PULL_STATISTICS_TRACKING` to allow safe rol
 * **TagPullStatistics** size grows with number of active tags across all repositories
 * **ManifestPullStatistics** size grows with unique manifests per repository  
 * Processing delay: Statistics updated every 5 minutes, not real-time
-* Dependency on audit logs availability (mitigated by database fallback)
+* Dependency on audit logs availability
 * Dual table updates required for tag pulls (slight processing overhead)
-
-### Risks and Mitigations
-
 * **Increased Query Volume**
-  - Current State: ES queries are primarily for audit/compliance (infrequent)
+  - Current State: ES queries are primarily for audit/compliance
   - With Pull Stats: Every UI page load, API call, and auto-pruning check queries ES
   - Impact: 100x-1000x increase in query volume
   - Need more ES nodes to handle query load, leads to read-heavy pattern
+
+### Risks and Mitigations
+
 * **Processing lag**: Configurable polling interval, can be tuned based on load
 * **Data consistency**: Worker tracks processing state to avoid duplicate processing
 
