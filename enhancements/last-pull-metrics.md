@@ -129,12 +129,10 @@ Pull Events → Audit Logs (existing) → Background Worker → New PullStatisti
    - **Tag pulls**: Update both `TagPullStatistics` (specific tag) and `ManifestPullStatistics` (underlying manifest)
    - **Digest pulls**: Update only `ManifestPullStatistics` (no specific tag affected)
 4. **Track Processing State**: Maintains last processed timestamp and log ID in `PullStatisticsProcessingState` table to enable incremental updates and avoid reprocessing the same logs
-5. **Handle Failures**: Falls back to direct database queries when logs model is inaccessible
 
 **Configuration**:
 - Poll interval: 5 minutes (configurable)
 - Batch processing: 1000 log entries
-- Handles logs model access failures with database fallback
 
 ### API Endpoints
 
@@ -177,7 +175,11 @@ The feature is gated behind `FEATURE_PULL_STATISTICS_TRACKING` to allow safe rol
 
 ### Risks and Mitigations
 
-* **Logs access failures**: Worker includes fallback to query database directly
+* **Increased Query Volume**
+  - Current State: ES queries are primarily for audit/compliance (infrequent)
+  - With Pull Stats: Every UI page load, API call, and auto-pruning check queries ES
+  - Impact: 100x-1000x increase in query volume
+  - Need more ES nodes to handle query load, leads to read-heavy pattern
 * **Processing lag**: Configurable polling interval, can be tuned based on load
 * **Data consistency**: Worker tracks processing state to avoid duplicate processing
 
@@ -414,6 +416,7 @@ Uses the same API endpoints as Approach 1 but with faster data availability:
 | Failure Recovery | Log reprocessing | Redis persistence |
 | Scalability | Limited by log volume | High (Redis scales) |
 | Historical Data | Full audit trail | Recent events only |
+  - Latency: 10-50ms per query on elastic search vs <1ms for Redis
 
 ### Test Plan
 
