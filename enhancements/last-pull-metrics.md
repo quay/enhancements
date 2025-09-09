@@ -256,7 +256,7 @@ pull_events:repo:{repository_id}:digest:{manifest_digest}
 **Configuration**:
 - Flush interval: 5 minutes (configurable via `REDIS_FLUSH_INTERVAL_SECONDS`)
 - Batch size: 1000 keys per processing cycle
-- Redis key TTL: 1 hour (backup cleanup if worker fails)
+- Redis key TTL: 1 day (backup cleanup if worker fails)
 - Retry attempts: 3 with exponential backoff
 
 **Processing Flow**:
@@ -321,15 +321,6 @@ The Redis approach leverages the same database tables as Approach 1 but with opt
 
 This ensures that manifest-level statistics accurately reflect the total usage of the underlying image content, regardless of how it was accessed.
 
-**New RedisProcessingState Table**:
-| Field | Type | Description |
-|-------|------|-------------|
-| id | PK | Auto-increment primary key |
-| last_processed_timestamp | datetime | Last successful Redis processing time |
-| processing_status | enum | IDLE, PROCESSING, ERROR |
-| error_message | text | Last error details (if any) |
-| keys_processed_count | bigint | Count of Redis keys processed in last cycle |
-
 ### Integration with Pull Endpoints
 
 **Minimal Code Changes**: Pull endpoints are enhanced with lightweight Redis operations:
@@ -366,12 +357,6 @@ Uses the same API endpoints as Approach 1 but with faster data availability:
 - Real-time counters available via Redis for immediate queries (optional endpoint)
 - Fallback to database for historical data when Redis keys expire
 
-**Optional Real-time Endpoint**:
-```
-GET /api/v1/repository/{repository}/pull_statistics/realtime
-Response: Current Redis-based statistics (last 5 minutes)
-```
-
 ### Monitoring and Observability
 
 **Metrics to Track**:
@@ -398,7 +383,6 @@ Response: Current Redis-based statistics (last 5 minutes)
 - Duplicate pull event protection through Redis key structure
 
 **Performance Impact**:
-- Redis operations add ~1-2ms to pull request latency
 - Minimal database load through batching
 - Worker processing scales with Redis memory, not pull volume
 
