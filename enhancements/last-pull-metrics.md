@@ -301,6 +301,91 @@ def aggregate_pull_events(redis_batch):
             })
     
     return tag_updates, manifest_updates
+
+def bulk_upsert_tag_statistics(tag_updates):
+    """Bulk upsert tag statistics ON CONFLICT"""
+    if not tag_updates:
+        return
+        
+    values = []
+    for update in tag_updates:
+        values.append(f"({update['repository_id']}, '{update['tag_name']}', "
+                     f"'{update['manifest_digest']}', {update['pull_count']}, "
+                     f"'{update['last_pull']}', NOW())")
+    
+    sql = f"""
+    INSERT INTO TagPullStatistics 
+        (repository_id, tag_name, current_manifest_digest, tag_pull_count, 
+         last_tag_pull_date, redis_last_processed)
+    VALUES {','.join(values)}
+    ON CONFLICT (repository_id, tag_name) 
+    DO UPDATE SET
+        current_manifest_digest = EXCLUDED.current_manifest_digest,
+        tag_pull_count = TagPullStatistics.tag_pull_count + EXCLUDED.tag_pull_count,
+        last_tag_pull_date = GREATEST(TagPullStatistics.last_tag_pull_date, EXCLUDED.last_tag_pull_date),
+        redis_last_processed = EXCLUDED.redis_last_processed
+    """
+    execute(sql)
+
+**Example: Processing Multiple Tag+Repo+Digest Combinations**
+
+During a 5-minute Redis flush cycle, the worker processes different combinations:
+
+```python
+# Input array to bulk_upsert_tag_statistics()
+tag_updates = [
+    {
+        'repository_id': 123,
+        'tag_name': 'latest', 
+        'manifest_digest': 'sha256abc',
+        'pull_count': 15,
+        'last_pull': '1694168400'
+    },
+    {
+        'repository_id': 123,
+        'tag_name': 'v1.0',
+        'manifest_digest': 'sha256abc', 
+        'pull_count': 8,
+        'last_pull': '1694168350'
+    },
+    {
+        'repository_id': 456,
+        'tag_name': 'v2.0',
+        'manifest_digest': 'sha256def',
+        'pull_count': 3,
+        'last_pull': '1694168200'
+    },
+    {
+        'repository_id': 789,
+        'tag_name': 'latest',
+        'manifest_digest': 'sha256ghi',
+        'pull_count': 22,
+        'last_pull': '1694168450'
+    }
+]
+
+# Results in single SQL query processing all combinations:
+INSERT INTO TagPullStatistics (...) VALUES 
+    (123, 'latest', 'sha256abc', 15, '2024-09-08 10:15:00', NOW()),
+    (123, 'v1.0', 'sha256abc', 8, '2024-09-08 10:14:10', NOW()),
+    (456, 'v2.0', 'sha256def', 3, '2024-09-08 10:11:40', NOW()),
+    (789, 'latest', 'sha256ghi', 22, '2024-09-08 10:15:50', NOW())
+ON CONFLICT (repository_id, tag_name) DO UPDATE SET ...
+```
+
+### Bulk Upsert Performance Benefits
+
+**Performance Comparison:**
+```
+Individual Operations:
+- 1000 Redis keys = 1000 database queries
+- Time: ~5-10 seconds (network overhead)
+- Database load: High (connection pool exhaustion)
+
+Bulk Operations:  
+- 1000 Redis keys = 2 database queries (tags + manifests)
+- Time: ~100-200ms
+- Database load: Low (minimal connections)
 ```
 
 ### Database Schema Enhancements
@@ -322,6 +407,29 @@ The Redis approach leverages the same database tables as Approach 1 but with opt
 - **Digest Pull** (`docker pull repo@sha256:abc...`): Updates ONLY ManifestPullStatistics (no specific tag involved)
 
 This ensures that manifest-level statistics accurately reflect the total usage of the underlying image content, regardless of how it was accessed.
+
+**Required Schema Additions for Redis Approach:**
+
+```sql
+-- Add to existing TagPullStatistics table
+ALTER TABLE TagPullStatistics 
+ADD COLUMN redis_last_processed DATETIME;
+
+-- Add to existing ManifestPullStatistics table  
+ALTER TABLE ManifestPullStatistics 
+ADD COLUMN redis_last_processed DATETIME;
+
+-- New table for tracking Redis processing state
+CREATE TABLE RedisProcessingState (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    last_processed_timestamp DATETIME NOT NULL,
+    processing_status ENUM('IDLE', 'PROCESSING', 'ERROR') DEFAULT 'IDLE',
+    error_message TEXT,
+    keys_processed_count BIGINT DEFAULT 0,
+    created_at DATETIME DEFAULT NOW(),
+    updated_at DATETIME DEFAULT NOW() ON UPDATE NOW()
+);
+```
 
 ### Integration with Pull Endpoints
 
