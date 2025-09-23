@@ -135,23 +135,27 @@ Pull Events → Audit Logs (existing) → Background Worker → New PullStatisti
 
 ### API Endpoints
 
-**Tag Pull Statistics**  
+**Tag Pull Statistics** (via `endpoints/api/tag.py`)
 ```
 GET /api/v1/repository/{repository}/tag/{tagname}/pull_statistics
 Response: {
   "tag_name": "v1.0",
   "tag_pull_count": 150,
   "last_tag_pull_date": "2024-09-08T10:15:00Z",
-  "manifest_digest": "sha256:abc123...",
-  "manifest_total_pull_count": 500,
-  "manifest_last_pull_date": "2024-09-08T10:20:00Z"
+  "current_manifest_digest": "sha256:abc123...",
+  "manifest_pull_count": 500,
+  "last_manifest_pull_date": "2024-09-08T10:20:00Z"
 }
 ```
 
-**Manifest Pull Statistics**
+**Manifest Pull Statistics** (via `endpoints/v2/manifest.py`)
 ```
-GET /api/v1/repository/{repository}/manifest/{digest}/pull_statistics  
-Response: Manifest-level statistics including all tags and digest pulls
+GET /api/v1/repository/{repository}/manifest/{digest}/pull_statistics
+Response: {
+  "manifest_digest": "sha256:abc123...",
+  "manifest_pull_count": 500,
+  "last_manifest_pull_date": "2024-09-08T10:20:00Z"
+}
 ```
 
 ### Feature Flag
@@ -198,6 +202,14 @@ capture        storage          aggregation       storage
 
 **Real-time Event Capture**: Pull events are immediately captured in Redis during image fetch operations (both by tag and by digest), providing near real-time tracking without impacting pull performance.
 
+**Redis Configuration**: Uses quay's Redis database for pull metrics:
+```python
+PULL_METRICS_REDIS = {
+    "host": "localhost",
+    "db": 1  # Redis database for pull metrics
+}
+```
+
 **Benefits**:
 - Near real-time pull statistics updates
 - High performance with minimal impact on pull requests
@@ -234,9 +246,9 @@ pull_events:repo:{repository_id}:digest:{manifest_digest}
     - HINCRBY: increments the numeric value of a hash field by the specified amount
     - HSET: Sets a field-value pair in the hash
 
-### Background Worker: RedisFlushWorker
+### Background Worker: redisflushworker
 
-**RedisFlushWorker**: A background service that periodically processes Redis pull events and flushes them to the persistent database.
+**redisflushworker**: A background service that periodically processes Redis pull events and flushes them to the persistent database. Configured via supervisord with autostart capability.
 
 **Processing Logic**:
 1. **Scan Redis Keys**: Uses Redis SCAN to iterate through all `pull_events:*` keys
@@ -346,13 +358,12 @@ ON CONFLICT (repository_id, tag_name) DO UPDATE SET ...
 The Redis approach leverages the same database tables as Approach 1 but with optimized bulk update patterns:
 
 **Enhanced TagPullStatistics Table**:
-- Adds `redis_last_processed` timestamp for tracking Redis sync state
 - Uses bulk UPSERT operations for efficient batch updates
 - Updated only when image is pulled by tag name
 
 **Enhanced ManifestPullStatistics Table**:
-- Adds `redis_last_processed` timestamp
 - Optimized for high-frequency bulk updates
+- Uses `manifest_pull_count` and `last_manifest_pull_date` fields
 - Updated for ALL pull operations (both tag pulls and direct digest pulls)
 
 **Update Logic**:
@@ -361,17 +372,6 @@ The Redis approach leverages the same database tables as Approach 1 but with opt
 
 This ensures that manifest-level statistics accurately reflect the total usage of the underlying image content, regardless of how it was accessed.
 
-**Required Schema Additions for Redis Approach:**
-
-```sql
--- Add to existing TagPullStatistics table
-ALTER TABLE TagPullStatistics 
-ADD COLUMN redis_last_processed DATETIME;
-
--- Add to existing ManifestPullStatistics table  
-ALTER TABLE ManifestPullStatistics 
-ADD COLUMN redis_last_processed DATETIME;
-```
 
 ### Integration with Pull Endpoints
 
@@ -379,7 +379,7 @@ ADD COLUMN redis_last_processed DATETIME;
 
 ```python
 def record_pull_event(repository_id, tag_name=None, manifest_digest=None):
-    if not feature_flag_enabled("FEATURE_REDIS_PULL_TRACKING"):
+    if not feature_flag_enabled("FEATURE_PULL_METRICS_ANALYTICS"):
         return
         
     if tag_name:
@@ -404,6 +404,29 @@ def record_pull_event(repository_id, tag_name=None, manifest_digest=None):
 ### API Endpoints
 
 Uses the same API endpoints as Approach 1 but with faster data availability:
+
+**Tag Pull Statistics** (via `endpoints/api/tag.py`)
+```
+GET /api/v1/repository/{repository}/tag/{tagname}/pull_statistics
+Response: {
+  "tag_name": "v1.0",
+  "tag_pull_count": 150,
+  "last_tag_pull_date": "2024-09-08T10:15:00Z",
+  "current_manifest_digest": "sha256:abc123...",
+  "manifest_pull_count": 500,
+  "last_manifest_pull_date": "2024-09-08T10:20:00Z"
+}
+```
+
+**Manifest Pull Statistics** (via `endpoints/v2/manifest.py`)
+```
+GET /api/v1/repository/{repository}/manifest/{digest}/pull_statistics
+Response: {
+  "manifest_digest": "sha256:abc123...",
+  "manifest_pull_count": 500,
+  "last_manifest_pull_date": "2024-09-08T10:20:00Z"
+}
+```
 
 - Statistics are updated within 5 minutes of pull events
 - Real-time counters available via Redis for immediate queries (optional endpoint)
@@ -475,6 +498,19 @@ Uses the same API endpoints as Approach 1 but with faster data availability:
 | Historical Data | Full audit trail | Recent events only |
   - Latency: 10-50ms per query on elastic search vs <1ms for Redis
 
+
+## Design decision
+
+After evaluating both approaches, we are proceeding with **Approach 2 (Redis-backed tracking)** for the following reasons:
+
+1. **Usage logs retention limitations**: Audit logs have limited retention periods, making long-term historical analysis unreliable
+2. **Query performance and cost**: Elasticsearch queries are expensive (10-50ms per query) and unreliable, especially at scale compared to Redis (<1ms)
+3. **Customer dependency reduction**: The Redis approach eliminates the need for customers to manually define and track last timestamp configurations for future auto-pruning policies
+4. **Better scalability**: Redis provides superior performance characteristics for high-volume pull workloads without overwhelming the audit log infrastructure
+
+The Redis approach provides near real-time metrics while maintaining system performance and reducing operational complexity for end users.
+
 ### Implementation History
 
-* 2024-09-08 Initial proposal
+* 2025-09-08 Initial proposal
+* 2025-09-23 Modified PoC for Redis approach
