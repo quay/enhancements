@@ -55,7 +55,7 @@ This enhancement addresses these gaps by providing comprehensive metrics and hea
 ### Goals
 
 1. **Provide four new metrics for repository mirroring:**
-   - Tags pending synchronization: Total number of tags not yet synchronized across all mirrored repositories
+   - Tags pending synchronization: Total number of tags not yet synchronized for each mirrored repository
    - Status of the last synchronization: An indicator (success/fail/in-progress) of the latest synchronization attempt per repository
    - Complete synchronization per repository: A boolean metric (0/1) indicating if a specific mirrored repository has successfully synchronized all its tags since the last run
    - Synchronization failure counter: A cumulative counter of mirroring failures per repository for alerting purposes
@@ -113,7 +113,7 @@ All metrics should be exposed via the existing Quay metrics endpoint (typically 
 
 **1. Tags Pending Synchronization**
 ```
-# HELP quay_repository_mirror_tags_pending Total number of tags pending synchronization across all mirrored repositories
+# HELP quay_repository_mirror_tags_pending Total number of tags pending synchronization for each mirrored repository
 # TYPE quay_repository_mirror_tags_pending gauge
 quay_repository_mirror_tags_pending{namespace="org1",repository="repo1"} 5
 quay_repository_mirror_tags_pending{namespace="org2",repository="repo2"} 0
@@ -375,7 +375,7 @@ In multi-component Quay deployments:
 ## Implementation History
 
 - 2024-10-04: RFE-6452 created by customer
-- 2025-10-22: Initial enhancement proposal created
+- 2025-10-15: Initial enhancement proposal created
 
 ## Drawbacks
 
@@ -387,16 +387,33 @@ While this enhancement provides significant operational benefits, there are some
 
 3. **Initial Setup Effort**: Operators will need to configure their monitoring systems to collect and visualize the new metrics. However, we will provide ready-to-use Prometheus alert rules and Grafana dashboard examples, significantly reducing the setup time. The investment in setup is quickly offset by the operational efficiency gains.
 
+## Alternatives
+
+### Alternative 1: Enhanced Logging Instead of Metrics
+
+Enhance existing logging with detailed synchronization status and rely on log aggregation tools for monitoring. Rejected because it requires separate log parsing infrastructure, lacks standardization, and is less efficient for querying and alerting compared to Prometheus metrics.
+
+### Alternative 2: External Monitoring Agent
+
+Develop a separate sidecar agent that polls the Quay database and exposes metrics independently. Rejected because it introduces a new component requiring independent maintenance, adds deployment complexity, and creates version compatibility challenges.
+
+### Alternative 3: Webhook-Based Event System
+
+Implement webhooks to push synchronization events to external monitoring systems. Rejected because it requires complex event delivery infrastructure, external state management, and only shows changes rather than current state.
+
+### Rationale for Proposed Solution
+
+The Prometheus metrics and health endpoint approach leverages existing infrastructure already used by Quay, provides a standardized interface, requires minimal additional code, and integrates naturally with Kubernetes/OpenShift monitoring stacks.
 
 ## Infrastructure Needed
 
 1. **Update Documentation**: To add user-facing documentation about the new metrics and health endpoint
 
-2. **Example Dashboard**: The documentation should also host and maintain example Prometheus alert rules, Grafana dashboard should be optional
+2. **Example Dashboard**: The documentation should also host and maintain example Grafana dashboards and Prometheus alert rules
 
 3. **Testing Infrastructure**: Test environments with:
    - Multiple mirrored repositories
-   - Prometheus setup
+   - Prometheus and Grafana setup
    - Ability to simulate various failure scenarios
 
 4. **CI/CD Updates**: Integration tests that verify metrics accuracy and health endpoint functionality
