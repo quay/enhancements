@@ -7,7 +7,7 @@ reviewers:
 approvers:
   - TBD
 creation-date: 2025-10-15
-last-updated: 2025-10-15
+last-updated: 2025-12-09
 status: provisional
 see-also:
   - "https://issues.redhat.com/browse/RFE-6452"
