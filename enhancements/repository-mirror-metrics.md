@@ -123,9 +123,11 @@ quay_repository_mirror_tags_pending{namespace="org2",repository="repo2"} 0
 ```
 # HELP quay_repository_mirror_last_sync_status Status of the last synchronization attempt (0=failed, 1=success, 2=in_progress)
 # TYPE quay_repository_mirror_last_sync_status gauge
-quay_repository_mirror_last_sync_status{namespace="org1",repository="repo1"} 1
-quay_repository_mirror_last_sync_status{namespace="org2",repository="repo2"} 0
+quay_repository_mirror_last_sync_status{namespace="org1",repository="repo1",last_error_reason=""} 1
+quay_repository_mirror_last_sync_status{namespace="org2",repository="repo2",last_error_reason="auth_failed"} 0
 ```
+
+Note: The `last_error_reason` label contains the failure reason when status is 0 (failed), mirroring the `reason` label values from `quay_repository_mirror_sync_failures_total`. This allows users to query the current failure state directly (e.g., `quay_repository_mirror_last_sync_status{namespace="org1"} == 0`) to see both that a repository is failing and why, without needing to correlate with the counter metric. When status is 1 (success) or 2 (in_progress), the label is empty.
 
 **3. Complete Synchronization Status**
 ```
@@ -335,10 +337,13 @@ When issues are present:
 - **Permissions**: Same as viewing repository information (user must have access to at least one mirrored repository)
 - **Response Format**: JSON
 - **Response Codes**:
-  - 200: Success, returns health status
+  - 200: Success, returns health status with `"healthy": true`
+  - 503: Service Unavailable, returns health status with `"healthy": false` (e.g., zero workers, critical errors)
   - 401: Unauthorized
   - 403: Forbidden (user doesn't have required permissions)
   - 500: Internal server error
+
+Note: The HTTP status code reflects the overall mirror worker health status. When the JSON response body shows `"healthy": true`, the endpoint returns 200 OK. When `"healthy": false` due to any critical issue (e.g., zero active workers, database connectivity issues, or persistent synchronization failures), the endpoint returns 503 Service Unavailable. This allows monitoring tools and load balancers to immediately determine health status from the HTTP status code without parsing the JSON body.
 
 **Optional Query Parameters**:
 - `namespace`: Filter health check to specific namespace
