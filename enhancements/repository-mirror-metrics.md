@@ -121,13 +121,14 @@ quay_repository_mirror_tags_pending{namespace="org2",repository="repo2"} 0
 
 **2. Last Synchronization Status**
 ```
-# HELP quay_repository_mirror_last_sync_status Status of the last synchronization attempt (0=failed, 1=success, 2=in_progress)
+# HELP quay_repository_mirror_last_sync_status Status of the last synchronization attempt
 # TYPE quay_repository_mirror_last_sync_status gauge
-quay_repository_mirror_last_sync_status{namespace="org1",repository="repo1",last_error_reason=""} 1
-quay_repository_mirror_last_sync_status{namespace="org2",repository="repo2",last_error_reason="auth_failed"} 0
+quay_repository_mirror_last_sync_status{namespace="org1",repository="repo1",status="success",last_error_reason=""} 1
+quay_repository_mirror_last_sync_status{namespace="org2",repository="repo2",status="failed",last_error_reason="auth_failed"} 1
+quay_repository_mirror_last_sync_status{namespace="org3",repository="repo3",status="in_progress",last_error_reason=""} 1
 ```
 
-Note: The `last_error_reason` label contains the failure reason when status is 0 (failed), mirroring the `reason` label values from `quay_repository_mirror_sync_failures_total`. This allows users to query the current failure state directly (e.g., `quay_repository_mirror_last_sync_status{namespace="org1"} == 0`) to see both that a repository is failing and why, without needing to correlate with the counter metric. When status is 1 (success) or 2 (in_progress), the label is empty.
+Note: This metric follows the Prometheus State Metric pattern where the value is always 1 when that specific status is active. The `status` label indicates the current state: `success`, `failed`, or `in_progress`. The `last_error_reason` label contains the failure reason when `status="failed"`, mirroring the `reason` label values from `quay_repository_mirror_sync_failures_total`. When status is `success` or `in_progress`, the `last_error_reason` label is empty. This design makes aggregations meaningful - for example, `sum(quay_repository_mirror_last_sync_status{status="failed"})` provides an instant count of all currently failing mirrors across the entire registry.
 
 **3. Complete Synchronization Status**
 ```
@@ -482,25 +483,30 @@ groups:
 
 **Panel 1: Synchronization Status Overview**
 ```promql
-sum by(namespace, repository) (quay_repository_mirror_last_sync_status)
+sum by(namespace, repository, status) (quay_repository_mirror_last_sync_status)
 ```
 
-**Panel 2: Failure Rate**
+**Panel 2: Count of Failed Mirrors**
+```promql
+sum(quay_repository_mirror_last_sync_status{status="failed"})
+```
+
+**Panel 3: Failure Rate**
 ```promql
 rate(quay_repository_mirror_sync_failures_total[5m])
 ```
 
-**Panel 3: Pending Tags by Repository**
+**Panel 4: Pending Tags by Repository**
 ```promql
 topk(10, quay_repository_mirror_tags_pending)
 ```
 
-**Panel 4: Active Mirror Workers**
+**Panel 5: Active Mirror Workers**
 ```promql
 quay_repository_mirror_workers_active
 ```
 
-**Panel 5: Synchronization Duration**
+**Panel 6: Synchronization Duration**
 ```promql
 histogram_quantile(0.95, rate(quay_repository_mirror_sync_duration_seconds_bucket[5m]))
 ```
