@@ -1,8 +1,7 @@
 ---
 title: Standardized STS Configuration via OLM and CCO for Quay on OpenShift
 authors:
-  - "@dmesser"
-  - "@doconnor"
+  - TBD
 reviewers:
   - TBD
 approvers:
