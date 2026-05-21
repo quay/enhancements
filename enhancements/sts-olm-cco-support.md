@@ -1,13 +1,16 @@
 ---
 title: Standardized STS Configuration via OLM and CCO for Quay on OpenShift
 authors:
-  - TBD
+  - "@dmesser"
+  - "@doconnor"
+  - "@tlwu2013"
 reviewers:
-  - TBD
+  - "@jbpratt"
+  - "@tlwu2013"
 approvers:
   - TBD
 creation-date: 2023-07-19
-last-updated: 2023-07-19
+last-updated: 2026-05-21
 status: implementable
 see-also:
   - "https://issues.redhat.com/browse/OCPSTRAT-171"
@@ -42,6 +45,20 @@ When `ObjectStorage` is set to `managed: false`, the customer provides their own
 
 Red Hat's platform strategy (OCPSTRAT-6) mandates that all OLM-managed operators capable of integrating with cloud-provider APIs adopt the CCO-based `CredentialRequest` flow. Quay has been identified as a target operator. A strategic customer (Elevance Health/Anthem) has this as a hard requirement for migrating Quay to ROSA.
 
+### Why the Operator Manages Credentials for Unmanaged Storage
+
+When `ObjectStorage: managed: false`, the operator does not create or manage the S3 bucket — the customer does. So why should the operator manage cloud credentials?
+
+The answer is that the operator is not managing *IAM credentials* in the traditional sense (it never creates IAM users, keys, or policies). Instead, it acts as a **configuration broker** between the OCP platform and the Quay application pods. Specifically:
+
+1. **The customer creates an IAM role** with the necessary S3 permissions and trust policy. This is the customer's responsibility, just like creating the bucket.
+2. **The customer supplies the role ARN** via the OLM Subscription (`ROLEARN`), following the same standardized pattern used by every other OLM operator that supports STS (OADP, cert-manager, etc.).
+3. **The operator creates a `CredentialRequest`** — a declarative request that tells CCO "the `quay-app` service account needs to assume this role." The operator does not generate, store, or rotate any credentials itself.
+4. **CCO provisions a credentials file** (containing the role ARN and the OIDC token path) and stores it in a Secret. This file is a *configuration pointer*, not a credential — it tells boto "call `AssumeRoleWithWebIdentity` with this role using the projected OIDC token."
+5. **The operator mounts this Secret** into the Quay application pods and sets `AWS_SHARED_CREDENTIALS_FILE`. This is the same kind of configuration injection the operator already performs (TLS certificates, config bundles, etc.).
+
+The operator already manages the `quay-app` Deployment, ServiceAccount, and volumes. Adding one more volume mount for CCO-provisioned config is consistent with its existing role. The alternative — asking customers to manually create Secrets, add volume mounts, and set environment variables — would break the standardized OCPSTRAT-171 UX that other operators provide and that OperatorHub surfaces.
+
 ### Goals
 
 - Implement the standardized CCO `CredentialRequest` flow for the `quay-app` service account when `ObjectStorage: managed: false` and the cluster is STS-capable.
@@ -72,9 +89,11 @@ Understanding the credential flow is essential because this is NOT the tradition
    OLM injects ROLEARN into all pods managed by this operator (including quay-app pods)
 
 2. Operator reads ROLEARN, detects STS-capable cluster, creates CredentialRequest
-   with serviceAccountNames: [quay-app] and stsIAMRoleARN: <ROLEARN value>
+   with serviceAccountNames: [quay-app], stsIAMRoleARN: <ROLEARN value>,
+   and cloudTokenPath: /var/run/secrets/openshift/serviceaccount/token
    ↓
-   CCO provisions a Secret containing a credentials file:
+   CCO validates the operator's OIDC token at cloudTokenPath,
+   then provisions a Secret containing a credentials file:
 
      [default]
      sts_regional_endpoints = regional
@@ -207,9 +226,10 @@ spec:
     namespace: <quayregistry-namespace>
   serviceAccountNames:
     - quay-app
+  cloudTokenPath: /var/run/secrets/openshift/serviceaccount/token
 ```
 
-`stsIAMRoleARN` (available since OCP 4.14 CCO) tells CCO to produce a web-identity credentials file rather than static IAM user keys. `serviceAccountNames: [quay-app]` is a required enforcement field — CCO rejects CredentialRequests without it. The `statementEntries` use `resource: "*"` because the operator does not know the customer's bucket name when storage is unmanaged; the actual bucket-scoped IAM policy is the customer's responsibility when creating the role.
+`stsIAMRoleARN` (available since OCP 4.14 CCO) tells CCO to produce a web-identity credentials file rather than static IAM user keys. `serviceAccountNames: [quay-app]` is a required enforcement field — CCO rejects CredentialRequests without it. `cloudTokenPath` tells CCO where the operator pod's projected OIDC token is located; CCO uses this to verify the operator's identity when processing the `CredentialRequest`. The `statementEntries` use `resource: "*"` because the operator does not know the customer's bucket name when storage is unmanaged; the actual bucket-scoped IAM policy is the customer's responsibility when creating the role.
 
 CCO produces the Secret `<quayregistry-name>-quay-app-aws` containing:
 
@@ -344,8 +364,50 @@ Derived from static analysis of all boto3 call sites in `storage/cloud.py` (`qua
 
 ### CSV Changes
 
+Three additions are required in the ClusterServiceVersion:
+
+#### Annotation
+
 ```yaml
 features.operators.openshift.io/token-auth-aws: "true"   # changed from "false"
+```
+
+#### Projected OIDC Token Volume for the Operator Pod
+
+The operator pod needs a projected `bound-sa-token` volume so that its own OIDC token is available at the path specified by `cloudTokenPath` in the `CredentialRequest`. Without this volume, the directory `/var/run/secrets/openshift/serviceaccount/` does not exist in the operator pod and CCO cannot validate the `CredentialRequest`.
+
+Add to the operator Deployment spec in the CSV:
+
+```yaml
+spec:
+  template:
+    spec:
+      containers:
+        - name: quay-operator
+          volumeMounts:
+            - name: bound-sa-token
+              mountPath: /var/run/secrets/openshift/serviceaccount
+              readOnly: true
+      volumes:
+        - name: bound-sa-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: openshift
+```
+
+#### Additional RBAC
+
+The operator needs read access to cluster infrastructure and cloud credential configuration for STS-capability detection (already listed in section 2 above, repeated here for CSV completeness):
+
+```yaml
+- apiGroups: ["config.openshift.io"]
+  resources: ["infrastructures"]
+  verbs: ["get"]
+- apiGroups: ["operator.openshift.io"]
+  resources: ["cloudcredentials"]
+  verbs: ["get"]
 ```
 
 ### RHEL-Based Quay Deployments
@@ -380,6 +442,30 @@ DISTRIBUTED_STORAGE_CONFIG:
 | CredentialRequest rejected by CCO (missing `serviceAccountNames`) | CCO 4.14+ requires this field; operator always populates it |
 | Regression on non-STS upgrades | STS path requires `ROLEARN` env var; existing Subscriptions without it are fully unaffected |
 | Multipart upload in-flight when OIDC token rotates | boto re-fetches the token file on each credential refresh cycle; the token at the path is updated by kubelet before expiry |
+
+### Open Design Questions
+
+#### Bundle-Shipped vs Runtime-Created CredentialRequest
+
+This enhancement proposes creating the `CredentialRequest` at runtime during reconciliation. An alternative approach (outlined in PROJQUAY-5850 comments) is to ship the `CredentialRequest` manifest in the operator bundle under `manifests/` so that `ccoctl` or CCO can process it during operator install.
+
+**Bundle-shipped** (standard OCPSTRAT-171 pattern, used by OADP):
+- Pros: Aligns with the documented CCO flow; `ccoctl` can extract and pre-provision credentials during disconnected installs; simpler operator code.
+- Cons: The CredentialRequest is static — cannot vary `stsIAMRoleARN` per QuayRegistry; requires the role ARN at bundle-build time or a fixed environment variable substitution.
+
+**Runtime-created** (used by some newer operators):
+- Pros: Can construct the CredentialRequest dynamically per QuayRegistry; handles the role ARN from `ROLEARN` env var naturally; supports multiple QuayRegistry instances with different roles in the future.
+- Cons: More operator code; requires RBAC for CredentialRequest CRUD; does not integrate with `ccoctl` disconnected install flow.
+
+**Recommendation**: Start with the bundle-shipped approach for OCPSTRAT-171 conformance. The `ROLEARN` value can be injected via OLM Subscription env vars, which the standard flow already supports. If per-registry role ARN support is needed later, runtime creation can be added as a follow-on.
+
+#### Storage Driver: `S3Storage` with Web Identity vs `STSS3Storage`
+
+The `STSS3Storage` driver in `quay/quay` uses `sts:AssumeRole` with static IAM user keys to obtain temporary credentials. This is a different STS flow from the CCO/web-identity path.
+
+With the CCO approach, the credentials file provisioned by CCO contains `role_arn` and `web_identity_token_file`. When `AWS_SHARED_CREDENTIALS_FILE` is set, boto3's standard credential chain resolves this automatically via `AssumeRoleWithWebIdentity` — no Quay code changes needed. The standard `S3Storage` driver works as-is because boto handles credential resolution transparently.
+
+**Recommendation**: Use `S3Storage` (not `STSS3Storage`) for the CCO path. `STSS3Storage` remains available for RHEL-based deployments where cross-account assume-role with static keys is the only option.
 
 ## Design Details
 
@@ -429,6 +515,10 @@ The `CredentialRequest` CRD is provided by CCO, which ships with OCP. The operat
 ## Implementation History
 
 - 2023-07-19 PROJQUAY-5850 filed; feasibility investigation completed.
+- 2026-04-16 Targeted for Quay 3.19 (Q4 2026); GCS WIF (PROJQUAY-7729) to share operator-side pattern.
+- 2026-04-17 Initial enhancement PR opened; review feedback on authors, credential brokering rationale.
+- 2026-04-28 Review feedback: `cloudTokenPath` and `bound-sa-token` volume additions required.
+- 2026-05-21 Enhancement updated to address review feedback; open design questions documented.
 
 ## Drawbacks
 
