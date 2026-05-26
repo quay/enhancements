@@ -10,7 +10,7 @@ reviewers:
 approvers:
   - TBD
 creation-date: 2023-07-19
-last-updated: 2026-05-21
+last-updated: 2026-05-26
 status: implementable
 see-also:
   - "https://issues.redhat.com/browse/OCPSTRAT-171"
@@ -31,7 +31,7 @@ see-also:
 
 AWS STS (Security Token Service) based authentication eliminates the need for static, long-lived AWS access keys by exchanging a Kubernetes-projected OIDC service account token for short-lived IAM credentials via `sts:AssumeRoleWithWebIdentity`. OpenShift's Cloud Credential Operator (CCO) standardizes this across OLM-managed operators through the `CredentialRequest` API.
 
-This enhancement integrates the Quay operator with the CCO `CredentialRequest` flow so that Quay application pods on STS-enabled OpenShift clusters (ROSA, OSD) can authenticate to real AWS S3 without static credentials. The implementation follows the pattern defined in OCPSTRAT-171 / OCPSTRAT-6, giving administrators the same installation experience they have with other CCO-integrated OLM operators such as OADP and cert-manager.
+This enhancement integrates the Quay operator with the CCO `CredentialRequest` flow so that Quay application pods on STS-enabled OpenShift clusters (ROSA, OSD) can authenticate to real AWS S3 without static credentials. The implementation follows the pattern defined in OCPSTRAT-171 / OCPSTRAT-6, giving administrators the same STS-enabled installation experience they have with other OLM operators that support token-based authentication.
 
 **Scope**: This enhancement applies exclusively to `ObjectStorage: managed: false` configurations where the customer supplies a real AWS S3 bucket. When `ObjectStorage: managed: true`, the operator provisions a NooBaa/ODF `ObjectBucketClaim` whose credentials are NooBaa-internal and not subject to AWS IAM or STS — that case is unaffected.
 
@@ -52,7 +52,7 @@ When `ObjectStorage: managed: false`, the operator does not create or manage the
 The answer is that the operator is not managing *IAM credentials* in the traditional sense (it never creates IAM users, keys, or policies). Instead, it acts as a **configuration broker** between the OCP platform and the Quay application pods. Specifically:
 
 1. **The customer creates an IAM role** with the necessary S3 permissions and trust policy. This is the customer's responsibility, just like creating the bucket.
-2. **The customer supplies the role ARN** via the OLM Subscription (`ROLEARN`), following the same standardized pattern used by every other OLM operator that supports STS (OADP, cert-manager, etc.).
+2. **The customer supplies the role ARN** via the OLM Subscription (`ROLEARN`), following the standardized OCPSTRAT-171 pattern for OLM operators that support STS.
 3. **The operator creates a `CredentialRequest`** — a declarative request that tells CCO "the `quay-app` service account needs to assume this role." The operator does not generate, store, or rotate any credentials itself.
 4. **CCO provisions a credentials file** (containing the role ARN and the OIDC token path) and stores it in a Secret. This file is a *configuration pointer*, not a credential — it tells boto "call `AssumeRoleWithWebIdentity` with this role using the projected OIDC token."
 5. **The operator mounts this Secret** into the Quay application pods and sets `AWS_SHARED_CREDENTIALS_FILE`. This is the same kind of configuration injection the operator already performs (TLS certificates, config bundles, etc.).
@@ -63,9 +63,9 @@ The operator already manages the `quay-app` Deployment, ServiceAccount, and volu
 
 - Implement the standardized CCO `CredentialRequest` flow for the `quay-app` service account when `ObjectStorage: managed: false` and the cluster is STS-capable.
 - Enable Quay application pods to authenticate to AWS S3 using short-lived `AssumeRoleWithWebIdentity` credentials. No static AWS credentials appear in any Kubernetes Secret or in `config.yaml`.
-- Follow the standard OLM role ARN injection pattern: the administrator provides the IAM role ARN in the Subscription's `spec.config.env` as `ROLEARN`; OLM propagates it to all operator-managed pods.
+- Follow the standard OLM role ARN injection pattern: the administrator provides the IAM role ARN in the Subscription's `spec.config.env` as `ROLEARN`; OLM injects it into the operator Deployment, and the operator uses it during reconciliation.
 - Gracefully fall back to the existing static-credential path when `ROLEARN` is not set or the cluster is not STS-capable.
-- Degrade the `QuayRegistry` with an informative condition when `ROLEARN` is set but CCO fails to provision the `CredentialRequest`.
+- Block rollout of the `QuayRegistry` with an informative `RolloutBlocked` condition when `ROLEARN` is set but CCO fails to provision the `CredentialRequest`.
 - Document the required IAM permissions and IAM role trust policy.
 - Annotate the Quay CSV with `features.operators.openshift.io/token-auth-aws: "true"`.
 
@@ -86,9 +86,9 @@ Understanding the credential flow is essential because this is NOT the tradition
 ```
 1. Admin installs operator via Subscription with spec.config.env: [{name: ROLEARN, value: <arn>}]
    ↓
-   OLM injects ROLEARN into all pods managed by this operator (including quay-app pods)
+   OLM injects ROLEARN into the operator Deployment only (not into quay-app pods)
 
-2. Operator reads ROLEARN, detects STS-capable cluster, creates CredentialRequest
+2. Operator reads ROLEARN from its own environment, detects STS-capable cluster, creates CredentialRequest
    with serviceAccountNames: [quay-app], stsIAMRoleARN: <ROLEARN value>,
    and cloudTokenPath: /var/run/secrets/openshift/serviceaccount/token
    ↓
@@ -132,7 +132,7 @@ As an OCP administrator running Quay today (either with NooBaa managed storage o
 
 #### Story 3 — Incomplete STS configuration is surfaced clearly
 
-As a ROSA administrator, if I provide `ROLEARN` but CCO cannot provision the `CredentialRequest` (wrong ARN, OIDC provider not configured, OCP < 4.14), I want the `QuayRegistry` to report a `Degraded` condition with a message telling me exactly what to check.
+As a ROSA administrator, if I provide `ROLEARN` but CCO cannot provision the `CredentialRequest` (wrong ARN, OIDC provider not configured, OCP < 4.14), I want the `QuayRegistry` to report a `RolloutBlocked` condition with a message telling me exactly what to check.
 
 ### Implementation Details
 
@@ -155,7 +155,7 @@ spec:
         value: "arn:aws:iam::123456789012:role/quay-s3-role"
 ```
 
-OLM propagates `ROLEARN` as an environment variable into all Deployments managed by the operator — both the operator pod and the Quay application pods. The operator reads `os.Getenv("ROLEARN")` during reconciliation. If it is empty, the STS path is skipped entirely.
+OLM's `spec.config.env` injects `ROLEARN` as an environment variable into the **operator Deployment only** — not into workloads the operator itself creates. The quay-app pods are created by the operator's reconcile loop, not by OLM, so `ROLEARN` is not automatically present in them. This is fine: the operator reads `os.Getenv("ROLEARN")` during reconciliation to decide whether to create the `CredentialRequest` and how to configure the quay-app Deployment. The quay-app pods receive their credentials via the mounted CCO Secret and `AWS_SHARED_CREDENTIALS_FILE`, not via `ROLEARN`. If `ROLEARN` is empty, the STS path is skipped entirely.
 
 #### 2. STS-Capable Cluster Detection
 
@@ -167,9 +167,14 @@ Before creating a `CredentialRequest`, the operator confirms the cluster is STS-
 4. **CCO mode**: Read `operator.openshift.io/v1 CloudCredential cluster`; confirm `spec.credentialsMode` is not `Mint` or `Passthrough` (those modes produce static keys, not web-identity config). Empty `credentialsMode` on AWS means STS mode.
 5. **CRD availability**: Confirm `credentialsrequests.cloudcredential.openshift.io` CRD exists via API discovery. Absent on OCP < 4.14 or non-OCP environments.
 
-New RBAC rules required in CSV:
+New RBAC rules required in CSV as **`clusterPermissions`** (not namespace-scoped `permissions`):
+
+`config.openshift.io/infrastructures` and `operator.openshift.io/cloudcredentials` are cluster-scoped resources (singleton objects named `cluster`). They cannot be accessed via namespace-scoped RBAC. Currently, the quay-operator CSV uses only namespace-scoped `permissions` — adding `clusterPermissions` means OLM will create a ClusterRole and ClusterRoleBinding for the operator ServiceAccount. This is a material change to the operator's OLM security footprint and should be reviewed by the security team.
+
+For reference, the OADP operator's CSV already uses `clusterPermissions` with `cloudcredential.openshift.io/credentialsrequests` RBAC, confirming this is the correct approach for CCO integration.
 
 ```yaml
+# CSV spec.install.spec.clusterPermissions (new section)
 - apiGroups: ["config.openshift.io"]
   resources: ["infrastructures"]
   verbs: ["get"]
@@ -270,12 +275,22 @@ Note: the storage type becomes `S3Storage` (not `RHOCSStorage`). `RHOCSStorage` 
 
 The operator does not generate the storage configuration for unmanaged storage — that comes from the customer's `configBundleSecret`. The operator only ensures that `AWS_SHARED_CREDENTIALS_FILE` is set on the pods. No modification of the customer's `config.yaml` content is needed or performed.
 
-#### 6. Degraded Condition
+**Credential conflict detection**: If a customer's existing `configBundleSecret` contains `s3_access_key` / `s3_secret_key` in `DISTRIBUTED_STORAGE_CONFIG`, boto3 will use those static credentials **instead of** the CCO-provisioned credentials file (explicit credentials take priority in boto's credential chain). The STS pathway would silently do nothing.
+
+When `ROLEARN` is set, the operator must inspect the customer's `configBundleSecret` for static AWS credentials in the storage configuration. If both are present, the operator should:
+1. Set a `RolloutBlocked` condition with reason `ConflictingCredentials` and a message instructing the customer to remove `s3_access_key`/`s3_secret_key` from their `configBundleSecret`.
+2. Not roll out the Quay pods until the conflict is resolved.
+
+This prevents a confusing state where STS appears configured but static credentials silently take precedence.
+
+#### 6. RolloutBlocked Condition
+
+The quay-operator uses `Available`, `RolloutBlocked`, and `ComponentsCreated` as condition types on `QuayRegistry` status. There is no `RolloutBlocked` condition type defined.
 
 If the `CredentialRequest` has not reached `status.provisioned == true` within a configurable timeout (default: 5 minutes) after `ROLEARN` is detected, the operator sets:
 
 ```
-type:    Degraded
+type:    RolloutBlocked
 status:  True
 reason:  CredentialRequestNotProvisioned
 message: "CCO has not provisioned CredentialRequest <name>. Verify: (1) the IAM role ARN
@@ -283,7 +298,7 @@ message: "CCO has not provisioned CredentialRequest <name>. Verify: (1) the IAM 
           not in Mint or Passthrough mode. See <docs link>."
 ```
 
-The operator does not roll out Quay until the `CredentialRequest` is provisioned.
+This prevents the operator from rolling out Quay pods until the `CredentialRequest` is provisioned, and makes the `QuayRegistry` status clearly indicate why the rollout is blocked. The existing status controller aggregation logic for `RolloutBlocked` applies — `Available` will remain `False` while any `RolloutBlocked` condition is `True`.
 
 ### Required IAM Permissions
 
@@ -397,17 +412,21 @@ spec:
                   audience: openshift
 ```
 
-#### Additional RBAC
+#### Additional RBAC (clusterPermissions)
 
-The operator needs read access to cluster infrastructure and cloud credential configuration for STS-capability detection (already listed in section 2 above, repeated here for CSV completeness):
+The operator needs read access to cluster-scoped infrastructure and cloud credential resources for STS-capability detection. These must be `clusterPermissions` in the CSV (not namespace-scoped `permissions`), since `infrastructures` and `cloudcredentials` are cluster-scoped singletons. See Section 2 for the full RBAC list including `credentialsrequests`.
 
 ```yaml
+# CSV spec.install.spec.clusterPermissions (new section)
 - apiGroups: ["config.openshift.io"]
   resources: ["infrastructures"]
   verbs: ["get"]
 - apiGroups: ["operator.openshift.io"]
   resources: ["cloudcredentials"]
   verbs: ["get"]
+- apiGroups: ["cloudcredential.openshift.io"]
+  resources: ["credentialsrequests"]
+  verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
 ```
 
 ### RHEL-Based Quay Deployments
@@ -438,26 +457,27 @@ DISTRIBUTED_STORAGE_CONFIG:
 |---|---|
 | `ROLEARN` set but `ObjectStorage` is managed (NooBaa) | Operator logs a warning and skips STS path; NooBaa credentials continue to be used |
 | CCO absent or in Mint/Passthrough mode | Detection step falls back to static credentials; logs the reason |
-| IAM role ARN wrong or trust policy misconfigured | `Degraded` condition with actionable message; operator retries each reconcile |
+| IAM role ARN wrong or trust policy misconfigured | `RolloutBlocked` condition with actionable message; operator retries each reconcile |
 | CredentialRequest rejected by CCO (missing `serviceAccountNames`) | CCO 4.14+ requires this field; operator always populates it |
 | Regression on non-STS upgrades | STS path requires `ROLEARN` env var; existing Subscriptions without it are fully unaffected |
+| Static credentials in `configBundleSecret` coexist with `ROLEARN` | Operator detects conflict and blocks rollout with `ConflictingCredentials` reason; admin must remove static keys |
 | Multipart upload in-flight when OIDC token rotates | boto re-fetches the token file on each credential refresh cycle; the token at the path is updated by kubelet before expiry |
 
 ### Open Design Questions
 
-#### Bundle-Shipped vs Runtime-Created CredentialRequest
+#### Credential Delivery Approach
 
-This enhancement proposes creating the `CredentialRequest` at runtime during reconciliation. An alternative approach (outlined in PROJQUAY-5850 comments) is to ship the `CredentialRequest` manifest in the operator bundle under `manifests/` so that `ccoctl` or CCO can process it during operator install.
+This enhancement proposes **runtime `CredentialRequest` creation** (Section 3 above). Two alternative approaches exist. The team should select one; the implementation details section will be updated to match.
 
-**Bundle-shipped** (standard OCPSTRAT-171 pattern, used by OADP):
-- Pros: Aligns with the documented CCO flow; `ccoctl` can extract and pre-provision credentials during disconnected installs; simpler operator code.
-- Cons: The CredentialRequest is static — cannot vary `stsIAMRoleARN` per QuayRegistry; requires the role ARN at bundle-build time or a fixed environment variable substitution.
+| Approach | How it works | `ccoctl` support | Per-registry ARN | Complexity | Precedent |
+|---|---|---|---|---|---|
+| **A. Runtime CredentialRequest** (proposed) | Operator creates `CredentialRequest` CR during reconciliation; CCO provisions a Secret | No | Yes | Medium | — |
+| **B. Bundle-shipped CredentialRequest** | `CredentialRequest` manifest shipped in bundle under `manifests/`; `ccoctl` or CCO processes it at install time | Yes | No (static) | Low | — |
+| **C. Direct Secret creation** | Operator reads `ROLEARN`, creates the AWS credentials Secret directly (role ARN + token path), bypassing CCO entirely | No | Yes | Lowest | OADP (`pkg/credentials/stsflow/stsflow.go`) |
 
-**Runtime-created** (used by some newer operators):
-- Pros: Can construct the CredentialRequest dynamically per QuayRegistry; handles the role ARN from `ROLEARN` env var naturally; supports multiple QuayRegistry instances with different roles in the future.
-- Cons: More operator code; requires RBAC for CredentialRequest CRUD; does not integrate with `ccoctl` disconnected install flow.
+**Note on OADP**: OADP does not use bundle-shipped CredentialRequests. It reads `ROLEARN` from the environment and creates the AWS credential Secret directly, bypassing CCO's `CredentialRequest` flow. OADP has RBAC for `credentialsrequests` in its CSV but does not exercise it. Similarly, cert-manager does not create CredentialRequests — it relies on admins to create them manually and consumes the resulting Secret.
 
-**Recommendation**: Start with the bundle-shipped approach for OCPSTRAT-171 conformance. The `ROLEARN` value can be injected via OLM Subscription env vars, which the standard flow already supports. If per-registry role ARN support is needed later, runtime creation can be added as a follow-on.
+**Recommendation**: Approach A (runtime CredentialRequest) is proposed because it delegates credential provisioning to CCO rather than reimplementing it in the operator. However, Approach C (the OADP pattern) is the lowest-complexity option and has production precedent. The team should decide based on whether CCO integration or simplicity is prioritized.
 
 #### Storage Driver: `S3Storage` with Web Identity vs `STSS3Storage`
 
@@ -477,7 +497,7 @@ With the CCO approach, the credentials file provisioned by CCO contains `role_ar
 - CCO-provisioned credentials file is mounted into Quay app pods; `AWS_SHARED_CREDENTIALS_FILE` is set.
 - Image push and pull succeed on a ROSA cluster with `ObjectStorage: managed: false` and no static AWS credentials anywhere.
 - Graceful fallback when `ROLEARN` is absent.
-- `Degraded` condition when `CredentialRequest` not provisioned.
+- `RolloutBlocked` condition when `CredentialRequest` not provisioned.
 
 #### Tech Preview
 
@@ -497,8 +517,9 @@ With the CCO approach, the credentials file provisioned by CCO contains `role_ar
 - **Unit**: `ROLEARN` set + unmanaged storage + STS cluster → `CredentialRequest` created with correct `stsIAMRoleARN` and `serviceAccountNames: [quay-app]`.
 - **Unit**: `ROLEARN` absent → no `CredentialRequest` created, no behavior change.
 - **Unit**: `ROLEARN` set + managed storage → no `CredentialRequest`, warning logged.
-- **Unit**: `CredentialRequest.status.provisioned == false` past timeout → `Degraded` condition set.
+- **Unit**: `CredentialRequest.status.provisioned == false` past timeout → `RolloutBlocked` condition set.
 - **Unit**: CCO in Mint mode → STS path skipped.
+- **Unit**: `ROLEARN` set + `configBundleSecret` contains `s3_access_key`/`s3_secret_key` → `RolloutBlocked` with `ConflictingCredentials` reason.
 - **Integration**: With CCO mock, verify Quay app Deployment has the volume mount and `AWS_SHARED_CREDENTIALS_FILE` env var after `CredentialRequest` is provisioned.
 - **E2E (kuttl)**: On live ROSA + unmanaged S3: push and pull images; confirm no AWS credentials in any Secret or `config.yaml`.
 - **Regression**: Standard OCP cluster without `ROLEARN`, managed or unmanaged storage — verify identical behavior to pre-enhancement.
@@ -519,6 +540,7 @@ The `CredentialRequest` CRD is provided by CCO, which ships with OCP. The operat
 - 2026-04-17 Initial enhancement PR opened; review feedback on authors, credential brokering rationale.
 - 2026-04-28 Review feedback: `cloudTokenPath` and `bound-sa-token` volume additions required.
 - 2026-05-21 Enhancement updated to address review feedback; open design questions documented.
+- 2026-05-26 Addressed bcaton85 review: corrected OLM env propagation, OADP precedent, condition type (RolloutBlocked), clusterPermissions, credential conflict detection.
 
 ## Drawbacks
 
