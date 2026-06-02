@@ -188,7 +188,9 @@ For reference, the OADP operator's CSV already uses `clusterPermissions` with `c
 
 #### 3. CredentialRequest — Created at Runtime
 
-The operator creates the `CredentialRequest` programmatically during reconciliation (not packaged in the bundle — OKD documentation explicitly states that bundled CredentialRequests are not supported). One `CredentialRequest` is created per `QuayRegistry` in the registry's namespace, owned by the `QuayRegistry` for garbage collection:
+The operator creates the `CredentialRequest` programmatically during reconciliation (not packaged in the bundle — OKD documentation explicitly states that bundled CredentialRequests are not supported). One `CredentialRequest` is created per `QuayRegistry` in the registry's namespace, owned by the `QuayRegistry` for garbage collection.
+
+**Namespace**: The CCO README states *"CredentialsRequests should be created in the openshift-cloud-credential-operator namespace"* — this instruction targets CVO-managed (core platform) operators that ship CredentialRequests as static manifests in the release image. CCO watches CredentialRequests across all namespaces (confirmed via CCO source: the controller registers a cluster-wide watch with no namespace filtering). For OLM-managed operators, creating the CR in the operator's namespace enables `ownerReference`-based garbage collection and follows the pattern used by the EFS CSI driver:
 
 ```yaml
 apiVersion: cloudcredential.openshift.io/v1
@@ -234,7 +236,11 @@ spec:
   cloudTokenPath: /var/run/secrets/openshift/serviceaccount/token
 ```
 
-`stsIAMRoleARN` (available since OCP 4.14 CCO) tells CCO to produce a web-identity credentials file rather than static IAM user keys. `serviceAccountNames: [quay-app]` is a required enforcement field — CCO rejects CredentialRequests without it. `cloudTokenPath` tells CCO where the operator pod's projected OIDC token is located; CCO uses this to verify the operator's identity when processing the `CredentialRequest`. The `statementEntries` use `resource: "*"` because the operator does not know the customer's bucket name when storage is unmanaged; the actual bucket-scoped IAM policy is the customer's responsibility when creating the role.
+`stsIAMRoleARN` (available since OCP 4.14 CCO) tells CCO to produce a web-identity credentials file rather than static IAM user keys. `serviceAccountNames: [quay-app]` is a required enforcement field — CCO rejects CredentialRequests without it.
+
+`cloudTokenPath` must be set explicitly to `/var/run/secrets/openshift/serviceaccount/token`. CCO's default (`/var/run/secrets/kubernetes.io/serviceaccount/token`) is the standard Kubernetes service account token, which has the wrong audience for OpenShift STS. The projected token at the OpenShift-specific path carries `audience: openshift`, which the cluster's OIDC provider expects when validating `AssumeRoleWithWebIdentity` calls.
+
+The `statementEntries` document the IAM permissions Quay requires. In STS mode, CCO does not enforce these — the actual permissions come from the customer's IAM role policy attached to the role ARN. `statementEntries` are used by `ccoctl` in Mint mode to generate IAM policies and are included here for documentation and auditability. The `resource: "*"` is used because the operator does not know the customer's bucket name when storage is unmanaged; the actual bucket-scoped IAM policy is the customer's responsibility when creating the role.
 
 CCO produces the Secret `<quayregistry-name>-quay-app-aws` containing:
 
@@ -387,6 +393,8 @@ Three additions are required in the ClusterServiceVersion:
 features.operators.openshift.io/token-auth-aws: "true"   # changed from "false"
 ```
 
+This annotation is a declarative signal to OperatorHub's web console. When set to `"true"`, the console displays a role ARN input field during operator installation, prompting the administrator to provide their IAM role ARN. The annotation does not automatically inject `ROLEARN` — the administrator must supply the value, which OLM then propagates to the operator Deployment via `Subscription.spec.config.env`.
+
 #### Projected OIDC Token Volume for the Operator Pod
 
 The operator pod needs a projected `bound-sa-token` volume so that its own OIDC token is available at the path specified by `cloudTokenPath` in the `CredentialRequest`. Without this volume, the directory `/var/run/secrets/openshift/serviceaccount/` does not exist in the operator pod and CCO cannot validate the `CredentialRequest`.
@@ -463,29 +471,35 @@ DISTRIBUTED_STORAGE_CONFIG:
 | Static credentials in `configBundleSecret` coexist with `ROLEARN` | Operator detects conflict and blocks rollout with `ConflictingCredentials` reason; admin must remove static keys |
 | Multipart upload in-flight when OIDC token rotates | boto re-fetches the token file on each credential refresh cycle; the token at the path is updated by kubelet before expiry |
 
-### Open Design Questions
+### Design Decisions
 
-#### Credential Delivery Approach
+#### Credential Delivery: Runtime CredentialRequest (Approach A)
 
-This enhancement proposes **runtime `CredentialRequest` creation** (Section 3 above). Two alternative approaches exist. The team should select one; the implementation details section will be updated to match.
+**Decision**: The operator creates `CredentialRequest` objects at runtime during reconciliation. CCO provisions the corresponding Secret. This is the officially documented pattern for OLM-managed operators.
 
-| Approach | How it works | `ccoctl` support | Per-registry ARN | Complexity | Precedent |
-|---|---|---|---|---|---|
-| **A. Runtime CredentialRequest** (proposed) | Operator creates `CredentialRequest` CR during reconciliation; CCO provisions a Secret | No | Yes | Medium | — |
-| **B. Bundle-shipped CredentialRequest** | `CredentialRequest` manifest shipped in bundle under `manifests/`; `ccoctl` or CCO processes it at install time | Yes | No (static) | Low | — |
-| **C. Direct Secret creation** | Operator reads `ROLEARN`, creates the AWS credentials Secret directly (role ARN + token path), bypassing CCO entirely | No | Yes | Lowest | OADP (`pkg/credentials/stsflow/stsflow.go`) |
+**Rationale**:
 
-**Note on OADP**: OADP does not use bundle-shipped CredentialRequests. It reads `ROLEARN` from the environment and creates the AWS credential Secret directly, bypassing CCO's `CredentialRequest` flow. OADP has RBAC for `credentialsrequests` in its CSV but does not exercise it. Similarly, cert-manager does not create CredentialRequests — it relies on admins to create them manually and consumes the resulting Secret.
+1. The OKD/OCP Operator SDK documentation explicitly prescribes runtime CredentialRequest creation for OLM operators and states: *"Adding a CredentialsRequest object to the Operator bundle is not currently supported."*
+2. The EFS CSI driver ([openshift/csi-operator PR #251](https://github.com/openshift/csi-operator/pull/251), merged 2024-08-06) implements this exact pattern: a `stsCredentialsRequestHook` reads `os.Getenv("ROLEARN")` and injects it into the CredentialRequest's `stsIAMRoleARN` field via `unstructured.SetNestedField`.
+3. This approach delegates credential file format and lifecycle to CCO, avoiding tight coupling to the AWS credentials file format.
+4. CCO 4.14+ detects STS-enabled clusters (via `IsTimedTokenCluster()`) even in Manual `credentialsMode` and semi-automates Secret provisioning for runtime CredentialRequests.
 
-**Recommendation**: Approach A (runtime CredentialRequest) is proposed because it delegates credential provisioning to CCO rather than reimplementing it in the operator. However, Approach C (the OADP pattern) is the lowest-complexity option and has production precedent. The team should decide based on whether CCO integration or simplicity is prioritized.
+#### Considered Alternatives
 
-#### Storage Driver: `S3Storage` with Web Identity vs `STSS3Storage`
+| Approach | How it works | Why not selected |
+|---|---|---|
+| **B. Bundle-shipped CredentialRequest** | `CredentialRequest` manifest shipped in bundle under `manifests/`; `ccoctl` or CCO processes it at install time | Explicitly unsupported by OLM for operator bundles. Cannot support per-registry ARNs (static manifest). |
+| **C. Direct Secret creation** | Operator reads `ROLEARN`, creates the AWS credentials Secret directly (role ARN + token path), bypassing CCO entirely | Deviates from official OLM guidance. Couples operator to AWS credential file format. OADP uses this approach (`pkg/credentials/stsflow/stsflow.go`) but bypasses CCO entirely — the RBAC for `credentialsrequests` in OADP's CSV exists because OLM requires it when `token-auth-aws: "true"` is set, not because OADP exercises it. |
+
+**Note on OADP**: OADP reads `ROLEARN` from the environment and creates the AWS credential Secret directly, bypassing CCO's `CredentialRequest` flow. While this works in production on ROSA, it is a deviation from the officially documented OLM pattern. cert-manager takes a different approach: it relies on admins to create CredentialRequests externally (via `ccoctl`) and consumes the resulting Secret.
+
+#### Storage Driver: `S3Storage` with Web Identity (not `STSS3Storage`)
+
+**Decision**: Use `S3Storage` for the CCO path. `STSS3Storage` remains available for RHEL-based deployments where cross-account assume-role with static keys is the only option.
 
 The `STSS3Storage` driver in `quay/quay` uses `sts:AssumeRole` with static IAM user keys to obtain temporary credentials. This is a different STS flow from the CCO/web-identity path.
 
 With the CCO approach, the credentials file provisioned by CCO contains `role_arn` and `web_identity_token_file`. When `AWS_SHARED_CREDENTIALS_FILE` is set, boto3's standard credential chain resolves this automatically via `AssumeRoleWithWebIdentity` — no Quay code changes needed. The standard `S3Storage` driver works as-is because boto handles credential resolution transparently.
-
-**Recommendation**: Use `S3Storage` (not `STSS3Storage`) for the CCO path. `STSS3Storage` remains available for RHEL-based deployments where cross-account assume-role with static keys is the only option.
 
 ## Design Details
 
@@ -541,6 +555,7 @@ The `CredentialRequest` CRD is provided by CCO, which ships with OCP. The operat
 - 2026-04-28 Review feedback: `cloudTokenPath` and `bound-sa-token` volume additions required.
 - 2026-05-21 Enhancement updated to address review feedback; open design questions documented.
 - 2026-05-26 Addressed bcaton85 review: corrected OLM env propagation, OADP precedent, condition type (RolloutBlocked), clusterPermissions, credential conflict detection.
+- 2026-06-02 Resolved open design questions after deep research into CCO source code and OLM operator precedent (EFS CSI driver, OADP). Committed to Approach A (runtime CredentialRequest). Added cloudTokenPath default clarification, statementEntries STS-mode behavior, token-auth-aws annotation explanation, CredentialRequest namespace guidance for OLM operators.
 
 ## Drawbacks
 
