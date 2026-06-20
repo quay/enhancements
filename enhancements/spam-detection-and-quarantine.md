@@ -57,7 +57,7 @@ durable review state, auditability, and a reversible remediation path.
 * Keep spam-detection configuration and quarantine state out of the Quay
   application database schema.
 * Limit service-tool writes to the Quay database to explicit repository
-  quarantine and redaction actions.
+  quarantine, restore, and redaction actions.
 * Support preview from `quay-service-tool` so operators can see which
   repositories would match a classifier and filter before any Quay data is
   changed.
@@ -166,6 +166,12 @@ needs bounded repository text, label (`spam` or `ham`), source
 identity where available, and timestamps. The service tool should support model
 retraining or model refresh from those examples without requiring a Quay
 database migration.
+
+The initial implementation should use a fixed, reviewed tokenizer pattern for
+both service-tool scans and Quay ingress. Arbitrary operator-supplied regular
+expressions should not be accepted in classifier artifacts until the
+implementation has a regex safety strategy that is suitable for Quay's request
+path.
 
 ### Action Rules and Policy
 
@@ -462,9 +468,9 @@ Running Quay in multiple pods has no automated-scan duplication impact in this
 design because Quay does not own the scheduled scanner. Multiple Quay pods do
 matter for ingress: all pods must receive the same classifier and policy
 configuration, and policy updates must have a defined propagation path. The
-implementation should either load a signed/versioned classifier artifact from
-shared configuration or call a service-tool-owned classifier endpoint with
-caching and fail-closed or fail-open behavior explicitly configured.
+  implementation should load a versioned local classifier artifact from shared
+  configuration and follow the configured fail-closed or fail-open behavior if
+  the artifact cannot be loaded or verified.
 
 Configuration keys:
 
@@ -472,8 +478,9 @@ Configuration keys:
 | --- | --- | --- | --- |
 | `FEATURE_SPAM_DETECTION` | `false` | Quay | Enables repository-description ingress spam evaluation |
 | `SPAM_DETECTION_DRY_RUN` | `true` | Quay | Allows ingress evaluation without rejection |
-| `SPAM_DETECTION_CLASSIFIER_ENDPOINT` | unset | Quay | Optional service-tool classifier endpoint for ingress evaluation |
+| `SPAM_DETECTION_CLASSIFIER_PATH` | unset | Quay | Local Bayesian classifier artifact used for ingress evaluation |
 | `SPAM_DETECTION_CLASSIFIER_VERSION` | unset | Quay | Expected classifier/policy version for ingress evaluation |
+| `SPAM_DETECTION_CLASSIFIER_SHA256` | unset | Quay | Optional SHA-256 checksum for the local classifier artifact |
 | `SPAM_DETECTION_FAIL_OPEN` | `true` | Quay | Allows repository updates if the ingress classifier is unavailable |
 | `SPAM_DETECTION_READONLY_DB_URI` | unset | service tool | Read-only Quay replica used for preview and scans |
 | `SPAM_DETECTION_WRITE_DB_URI` | unset | service tool | Write-capable Quay DB path for approved quarantine, restore, and redaction |
