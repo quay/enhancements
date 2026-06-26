@@ -156,7 +156,7 @@ Classifier configuration stored by the service tool should include:
 | `model_snapshot` | Serialized model parameters or a pointer to a stored model artifact |
 | `feature_config` | JSON options for tokenization and metadata features |
 | `scan_threshold` | Probability or score required to flag a repository during scans |
-| `ingress_threshold` | Probability or score required to reject a create/update request |
+| `ingress_threshold` | Default ingress threshold used when the classifier is trained or exported outside the active policy |
 | `created_at`, `updated_at` | Timestamps |
 | `created_by`, `updated_by` | Operator identity where available |
 
@@ -183,7 +183,8 @@ Policy should include:
 
 * which classifier configuration is active;
 * minimum score/probability for scan matches;
-* minimum score/probability for ingress rejection;
+* minimum score/probability for ingress rejection, with the active service-tool
+  policy treated as the source of truth for generated Quay ingress artifacts;
 * scan filters such as namespace scope, repository visibility, repository
   emptiness, and maximum repositories per run;
 * whether automated scans are dry-run only;
@@ -194,7 +195,9 @@ Policy should include:
 * whether redaction is available and which operator role is allowed to run it.
 
 All policy changes should be made through `quay-service-tool` and recorded in
-service-tool audit history.
+service-tool audit history. When the ingress threshold changes, the service tool
+must generate or export a new versioned classifier artifact before Quay can
+enforce the updated threshold.
 
 ### Rule and Policy Management in quay-service-tool
 
@@ -272,6 +275,7 @@ service-tool UI:
 | `POST /spam-detection/classifiers` | Create or import classifier configuration | service-tool state DB |
 | `PUT /spam-detection/classifiers/<uuid>` | Edit classifier settings or enabled state | service-tool state DB |
 | `POST /spam-detection/classifiers/<uuid>/train` | Retrain from approved examples | service-tool state DB |
+| `POST /spam-detection/classifiers/<uuid>/export-artifact` | Export the trained model with the active ingress policy embedded in a versioned artifact | service-tool state DB |
 | `GET /spam-detection/policy` | Read active action policy | service-tool state DB |
 | `PUT /spam-detection/policy` | Update action policy | service-tool state DB |
 | `POST /spam-detection/preview` | Preview a classifier and policy draft | read-only Quay DB replica plus service-tool state DB |
@@ -397,6 +401,11 @@ increasingly expensive offsets on large installations. The scanner should
 prefetch tag-existence or repository-emptiness inputs for each page to avoid
 per-repository database queries.
 
+The read path should use a Quay database account or replica that is read-only at
+the database permission layer. The service-tool scanner and preview helpers
+should also enable a read-only session where the selected database supports it,
+so accidental writes through the scan connection fail early.
+
 The scanner supports:
 
 * configurable batch size,
@@ -493,8 +502,10 @@ Configuration keys:
 
 Quay should apply the Bayesian classifier when a user creates or updates a
 repository description. Ingress should use the active classifier and ingress
-threshold configured through the service tool, subject to Quay's
-`FEATURE_SPAM_DETECTION` and `SPAM_DETECTION_DRY_RUN` settings.
+threshold embedded in the service-tool-generated artifact, subject to Quay's
+`FEATURE_SPAM_DETECTION` and `SPAM_DETECTION_DRY_RUN` settings. The service-tool
+policy is the source of truth for that threshold; Quay only consumes the
+versioned local artifact and never calls service-tool on the request path.
 
 Ingress checks should evaluate the proposed repository description and other
 request-local fields available on the create/update path. When enforcement is
@@ -604,7 +615,8 @@ The Quay backend implementation should include pytest coverage for:
 The `quay-service-tool` implementation should be tested in its own repository:
 
 * backend pytest coverage for classifier configuration, training examples,
-  retraining or model refresh, policy changes, and validation;
+  retraining or model refresh, active-policy threshold embedding, policy
+  changes, artifact export, and validation;
 * backend pytest coverage for preview workflows against the read-only replica;
 * backend pytest coverage for scan execution, dry-run persistence, run history,
   match history, and review queue filtering;
@@ -615,6 +627,9 @@ The `quay-service-tool` implementation should be tested in its own repository:
 * backend pytest coverage for read-only replica path selection for
   preview/scanning/reporting and write-capable path selection for quarantine,
   restore, and redaction;
+* backend pytest coverage proving scan/preview read-only database connections
+  reject accidental writes where the database supports session-level read-only
+  mode;
 * backend pytest coverage for health/startup behavior when the service-tool
   state DB, read-only Quay replica, or write-capable Quay DB path is
   unavailable;
