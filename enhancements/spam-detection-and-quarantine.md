@@ -191,7 +191,8 @@ Policy should include:
 * whether matches should only be recorded or also moved into the service-tool
   review queue;
 * whether approved quarantine clears the description, replaces it with a
-  placeholder, or uses another existing Quay-supported content mutation;
+  placeholder that includes restoration contact instructions, or uses another
+  existing Quay-supported content mutation;
 * whether redaction is available and which operator role is allowed to run it.
 
 All policy changes should be made through `quay-service-tool` and recorded in
@@ -379,6 +380,12 @@ review record without modifying repository content beyond any already-applied
 quarantine action. Redaction is permanent cleanup and writes directly to the
 Quay repository record while preserving service-tool action history.
 
+The default quarantine replacement text should tell repository owners that the
+description was removed by spam detection and include instructions to contact
+Quay support if they believe the description should be restored. Deployments can
+override this text through service-tool policy or
+`SPAM_DETECTION_QUARANTINE_DESCRIPTION`.
+
 ### Scanner
 
 The scanner should run from `quay-service-tool`, not as an always-on worker in
@@ -493,6 +500,7 @@ Configuration keys:
 | `SPAM_DETECTION_FAIL_OPEN` | `true` | Quay | Allows repository updates if the ingress classifier is unavailable |
 | `SPAM_DETECTION_READONLY_DB_URI` | unset | service tool | Read-only Quay replica used for preview and scans |
 | `SPAM_DETECTION_WRITE_DB_URI` | unset | service tool | Write-capable Quay DB path for approved quarantine, restore, and redaction |
+| `SPAM_DETECTION_QUARANTINE_DESCRIPTION` | contact-instructions placeholder | service tool | Repository description written by approved quarantine actions |
 | `SPAM_DETECTION_BATCH_SIZE` | `200` | service tool | Repositories scanned per batch |
 | `SPAM_DETECTION_SLEEP_BETWEEN_BATCHES` | `0.5` | service tool | Delay between scan batches |
 | `SPAM_DETECTION_SCAN_DRY_RUN` | `true` | service tool | Report matches without opening quarantine records or changing Quay content |
@@ -506,6 +514,16 @@ threshold embedded in the service-tool-generated artifact, subject to Quay's
 `FEATURE_SPAM_DETECTION` and `SPAM_DETECTION_DRY_RUN` settings. The service-tool
 policy is the source of truth for that threshold; Quay only consumes the
 versioned local artifact and never calls service-tool on the request path.
+
+The supported production artifact handoff is build-time export. Service-tool
+should export the active artifact to an explicit output path, including its
+SHA-256 sidecar, so the Quay image build can copy the artifact into the image at
+a stable path. Quay deployments then configure `SPAM_DETECTION_CLASSIFIER_PATH`,
+`SPAM_DETECTION_CLASSIFIER_VERSION`, and optionally
+`SPAM_DETECTION_CLASSIFIER_SHA256` for the baked artifact. Updating the
+classifier requires exporting a new artifact, rebuilding or otherwise producing
+a new Quay image containing that artifact, and rolling all Quay pods to the same
+artifact version.
 
 Ingress checks should evaluate the proposed repository description and other
 request-local fields available on the create/update path. When enforcement is
