@@ -7,7 +7,7 @@ reviewers:
 approvers:
   - TBD
 creation-date: 2026-06-12
-last-updated: 2026-06-20
+last-updated: 2026-07-03
 status: implementable
 ---
 
@@ -190,9 +190,9 @@ Policy should include:
 * whether automated scans are dry-run only;
 * whether matches should only be recorded or also moved into the service-tool
   review queue;
-* whether approved quarantine clears the description, replaces it with a
-  placeholder that includes restoration contact instructions, or uses another
-  existing Quay-supported content mutation;
+* the standard quarantine notice used by approved quarantine actions, including
+  restoration contact instructions, remediation requirements, and expected
+  review timelines;
 * whether redaction is available and which operator role is allowed to run it.
 
 All policy changes should be made through `quay-service-tool` and recorded in
@@ -357,7 +357,7 @@ Quarantine records should also be service-tool owned:
 | `namespace_name`, `repository_name` | Snapshot of repository identity |
 | `status` | `flagged`, `quarantined`, `restored`, `dismissed`, or `redacted` |
 | `original_description` | Description captured before quarantine |
-| `quarantine_description` | Description written to Quay during quarantine, if any |
+| `quarantine_description` | Standard quarantine notice written to Quay during quarantine |
 | `classifier_score` | Score that caused the repository to be flagged |
 | `classifier_snapshot` | Classifier metadata used for the decision |
 | `run_id` | Run that produced the record, if any |
@@ -380,11 +380,24 @@ review record without modifying repository content beyond any already-applied
 quarantine action. Redaction is permanent cleanup and writes directly to the
 Quay repository record while preserving service-tool action history.
 
-The default quarantine replacement text should tell repository owners that the
-description was removed by spam detection and include instructions to contact
-Quay support if they believe the description should be restored. Deployments can
-override this text through service-tool policy or
-`SPAM_DETECTION_QUARANTINE_DESCRIPTION`.
+When an existing repository is moved to `quarantined`, the service tool should
+replace the repository description with a standard quarantine notice. The
+notice is the repository-owner-facing restoration path and should include:
+
+* that the repository description was removed because automated spam detection
+  flagged it for review;
+* the support contact or restoration request URL;
+* the remediation expected from the owner, such as removing promotional,
+  deceptive, or unrelated link content before requesting restore;
+* the expected review timeline after a restore request is filed; and
+* a stable reference to the namespace/repository and quarantine record where
+  that can be included without exposing sensitive internal data.
+
+The original description remains in the service-tool quarantine record so a
+restore action can write it back after review. The initial implementation
+should use one deployment-provided notice string through service-tool policy or
+`SPAM_DETECTION_QUARANTINE_DESCRIPTION`; it should not add a separate template
+engine or per-namespace message customization.
 
 ### Scanner
 
@@ -484,9 +497,9 @@ Running Quay in multiple pods has no automated-scan duplication impact in this
 design because Quay does not own the scheduled scanner. Multiple Quay pods do
 matter for ingress: all pods must receive the same classifier and policy
 configuration, and policy updates must have a defined propagation path. The
-  implementation should load a versioned local classifier artifact from shared
-  configuration and follow the configured fail-closed or fail-open behavior if
-  the artifact cannot be loaded or verified.
+implementation should load the same versioned classifier artifact from a
+stable path baked into the Quay image and follow the configured fail-closed or
+fail-open behavior if the artifact cannot be loaded or verified.
 
 Configuration keys:
 
@@ -494,13 +507,13 @@ Configuration keys:
 | --- | --- | --- | --- |
 | `FEATURE_SPAM_DETECTION` | `false` | Quay | Enables repository-description ingress spam evaluation |
 | `SPAM_DETECTION_DRY_RUN` | `true` | Quay | Allows ingress evaluation without rejection |
-| `SPAM_DETECTION_CLASSIFIER_PATH` | unset | Quay | Local Bayesian classifier artifact used for ingress evaluation |
+| `SPAM_DETECTION_CLASSIFIER_PATH` | `/conf/spam-detection/classifier.json` | Quay | In-image Bayesian classifier artifact used for ingress evaluation |
 | `SPAM_DETECTION_CLASSIFIER_VERSION` | unset | Quay | Expected classifier/policy version for ingress evaluation |
 | `SPAM_DETECTION_CLASSIFIER_SHA256` | unset | Quay | Optional SHA-256 checksum for the local classifier artifact |
 | `SPAM_DETECTION_FAIL_OPEN` | `true` | Quay | Allows repository updates if the ingress classifier is unavailable |
 | `SPAM_DETECTION_READONLY_DB_URI` | unset | service tool | Read-only Quay replica used for preview and scans |
 | `SPAM_DETECTION_WRITE_DB_URI` | unset | service tool | Write-capable Quay DB path for approved quarantine, restore, and redaction |
-| `SPAM_DETECTION_QUARANTINE_DESCRIPTION` | contact-instructions placeholder | service tool | Repository description written by approved quarantine actions |
+| `SPAM_DETECTION_QUARANTINE_DESCRIPTION` | deployment-provided notice | service tool | Standard quarantine notice written by approved quarantine actions |
 | `SPAM_DETECTION_BATCH_SIZE` | `200` | service tool | Repositories scanned per batch |
 | `SPAM_DETECTION_SLEEP_BETWEEN_BATCHES` | `0.5` | service tool | Delay between scan batches |
 | `SPAM_DETECTION_SCAN_DRY_RUN` | `true` | service tool | Report matches without opening quarantine records or changing Quay content |
@@ -515,15 +528,19 @@ threshold embedded in the service-tool-generated artifact, subject to Quay's
 policy is the source of truth for that threshold; Quay only consumes the
 versioned local artifact and never calls service-tool on the request path.
 
-The supported production artifact handoff is build-time export. Service-tool
-should export the active artifact to an explicit output path, including its
-SHA-256 sidecar, so the Quay image build can copy the artifact into the image at
-a stable path. Quay deployments then configure `SPAM_DETECTION_CLASSIFIER_PATH`,
-`SPAM_DETECTION_CLASSIFIER_VERSION`, and optionally
-`SPAM_DETECTION_CLASSIFIER_SHA256` for the baked artifact. Updating the
-classifier requires exporting a new artifact, rebuilding or otherwise producing
-a new Quay image containing that artifact, and rolling all Quay pods to the same
-artifact version.
+The supported production artifact handoff is build-time export into the Quay
+image. `quay-service-tool` exports the active classifier/policy artifact as a
+versioned JSON file, plus a SHA-256 sidecar, before the Quay image build. The
+Quay image build copies that JSON artifact into a stable in-image location,
+`/conf/spam-detection/classifier.json`, and copies the checksum sidecar beside
+it. Quay loads the artifact from that local path at startup and verifies the
+configured `SPAM_DETECTION_CLASSIFIER_VERSION` and optional
+`SPAM_DETECTION_CLASSIFIER_SHA256`.
+
+Updating the classifier requires exporting a new JSON artifact, rebuilding the
+Quay image with the baked artifact, and rolling all Quay pods to the same image
+and artifact version. The initial implementation should not require a runtime
+artifact download, shared mutable volume, or service-tool call from Quay pods.
 
 Ingress checks should evaluate the proposed repository description and other
 request-local fields available on the create/update path. When enforcement is
@@ -611,10 +628,9 @@ including:
 * **Inline blocking false positives:** Ingress blocking follows the same
   classifier/policy configuration, feature flag, dry-run setting, and ingress
   threshold as the rest of spam detection.
-* **Classifier availability at ingress:** The Quay ingress hook must define
-  fail-open or fail-closed behavior and should cache versioned classifier
-  configuration to avoid making repository updates depend on a fragile runtime
-  call.
+* **Classifier availability at ingress:** Quay loads a baked-in JSON artifact
+  from the image and uses the configured fail-open or fail-closed behavior if
+  the artifact is missing, corrupt, or has the wrong version.
 
 ## Test Plan
 
@@ -700,7 +716,8 @@ does not add an in-tree UI surface.
   `quay-service-tool` workflow.
 * Product documentation covers service-tool classifier configuration, policy
   configuration, preview, historical review, quarantine, restore, redaction,
-  scheduling, and troubleshooting.
+  quarantine notice text, baked artifact updates, scheduling, and
+  troubleshooting.
 
 ## Upgrade / Downgrade Strategy
 
@@ -727,10 +744,12 @@ until all Quay application instances have the ingress hook and configuration
 schema that understand the spam detection settings.
 
 If ingress evaluation is enabled during a later rolling update, all Quay pods
-must use a compatible classifier/policy version. The implementation should make
-classifier version mismatches visible and should follow the configured
-fail-open or fail-closed behavior when a pod cannot load the expected
-classifier configuration.
+must use a compatible classifier/policy version. Because the classifier JSON is
+baked into the Quay image, operators should roll pods by image version and keep
+`SPAM_DETECTION_CLASSIFIER_VERSION` aligned with that image. The implementation
+should make classifier version mismatches visible and should follow the
+configured fail-open or fail-closed behavior when a pod cannot load the
+expected classifier configuration.
 
 Service-tool version skew is handled separately. Scheduled scans should run
 from one service-tool version at a time, preferably through an OpenShift
@@ -749,8 +768,9 @@ on the configured replica even when paginated and rate-limited.
 
 Ingress blocking also adds operational risk because repository create/update
 requests can depend on classifier availability and policy propagation. The
-feature flag, dry-run mode, classifier versioning, and explicit fail-open or
-fail-closed configuration are required to make that risk manageable.
+feature flag, dry-run mode, baked JSON artifact, classifier versioning, and
+explicit fail-open or fail-closed configuration are required to make that risk
+manageable.
 
 ## Alternatives
 
@@ -777,3 +797,6 @@ fail-closed configuration are required to make that risk manageable.
 * 2026-06-20 Updated proposal to use Bayesian filtering, service-tool-owned
   spam detection state, service-tool scan orchestration, and Quay ingress as
   the narrow Quay-side integration point.
+* 2026-07-03 Clarified that quarantined repository descriptions are replaced
+  with a restore-contact notice and that Quay consumes a JSON classifier
+  artifact baked into the image.
