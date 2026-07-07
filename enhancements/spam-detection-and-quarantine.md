@@ -7,7 +7,7 @@ reviewers:
 approvers:
   - TBD
 creation-date: 2026-06-12
-last-updated: 2026-07-03
+last-updated: 2026-07-07
 status: implementable
 ---
 
@@ -58,6 +58,8 @@ durable review state, auditability, and a reversible remediation path.
   application database schema.
 * Limit service-tool writes to the Quay database to explicit repository
   quarantine, restore, and redaction actions.
+* Require scan candidates to have no pushed image content before they can be
+  treated as spam matches or opened for quarantine review.
 * Support preview from `quay-service-tool` so operators can see which
   repositories would match a classifier and filter before any Quay data is
   changed.
@@ -140,10 +142,13 @@ lets operators improve detection by reviewing examples and updating the model
 with spam and non-spam labels.
 
 The classifier should evaluate repository descriptions as the primary signal.
-The implementation may include supporting features such as repository name,
-repository emptiness, namespace/account age, URL count, token frequency, and
-description length, provided the classifier can explain which features
-contributed to a match well enough for operator review.
+For service-tool scans, repository emptiness is a mandatory eligibility check,
+not just a weighted classifier feature: a repository must have no pushed image
+content at scan time before it can be recorded as a spam match, moved into the
+review queue, or quarantined. The implementation may include supporting
+features such as repository name, namespace/account age, URL count, token
+frequency, and description length, provided the classifier can explain which
+features contributed to a match well enough for operator review.
 
 Classifier configuration stored by the service tool should include:
 
@@ -186,7 +191,8 @@ Policy should include:
 * minimum score/probability for ingress rejection, with the active service-tool
   policy treated as the source of truth for generated Quay ingress artifacts;
 * scan filters such as namespace scope, repository visibility, repository
-  emptiness, and maximum repositories per run;
+  emptiness, and maximum repositories per run, where repository emptiness is
+  required for scan matches and quarantine-review eligibility;
 * whether automated scans are dry-run only;
 * whether matches should only be recorded or also moved into the service-tool
   review queue;
@@ -199,6 +205,30 @@ All policy changes should be made through `quay-service-tool` and recorded in
 service-tool audit history. When the ingress threshold changes, the service tool
 must generate or export a new versioned classifier artifact before Quay can
 enforce the updated threshold.
+
+Hard identifiers should be objective repository or namespace predicates that are
+evaluated outside the Bayesian score and stored in policy snapshots. The initial
+scan policy must require empty repositories. Additional recommended hard
+identifiers for reducing false positives include:
+
+* public visibility, because private repositories are less likely to be useful
+  for public lure or search spam;
+* repository age or namespace/account age below a configurable threshold, because
+  new empty repositories are higher-signal than long-lived empty repositories;
+* non-exempt namespace status, so trusted, internal, paid, or operator-managed
+  namespaces can be excluded before classification;
+* external URL presence or URL count above a configurable threshold, because
+  spam descriptions commonly redirect users away from the registry;
+* lack of retained successful push/build activity where audit data is available,
+  as a secondary confirmation that the repository has not hosted legitimate
+  image content;
+* absence of established collaboration signals, such as team-managed ownership
+  or multiple non-owner collaborators, where those signals are available without
+  expensive per-repository queries.
+
+These additional identifiers should be policy configurable rather than baked
+into Quay, and preview should show which hard identifiers each candidate matched
+so operators can tune the policy before enabling scan history or quarantine.
 
 ### Rule and Policy Management in quay-service-tool
 
@@ -246,7 +276,8 @@ The service-tool spam detection section should support:
 * creating or importing training examples;
 * retraining or refreshing the Bayesian model from approved examples;
 * configuring scan and ingress thresholds;
-* configuring scan filters and dry-run behavior;
+* configuring scan filters and dry-run behavior, with repository emptiness always
+  enforced for scan matches;
 * previewing a saved classifier/policy or unsaved policy draft against the
   read-only replica;
 * showing how many repositories would match the current policy draft before it
@@ -345,6 +376,7 @@ Run match records should include:
 | `classifier_score` | Score or probability assigned by the classifier |
 | `explanation` | Bounded feature/explanation details for review |
 | `is_empty` | Whether the repository was empty during scan |
+| `hard_filter_results` | Snapshot of hard identifier checks used for candidate eligibility |
 | `quarantine_record_id` | Linked service-tool quarantine row if one was opened |
 | `created_at` | Match timestamp |
 
@@ -419,7 +451,10 @@ LIMIT batch_size
 This avoids skipped rows when repository IDs are sparse and avoids
 increasingly expensive offsets on large installations. The scanner should
 prefetch tag-existence or repository-emptiness inputs for each page to avoid
-per-repository database queries.
+per-repository database queries. Repositories that are not empty at scan time
+must be excluded before writing match history, opening quarantine-review records,
+or applying quarantine actions, even when the classifier score exceeds the scan
+threshold.
 
 The read path should use a Quay database account or replica that is read-only at
 the database permission layer. The service-tool scanner and preview helpers
@@ -431,6 +466,7 @@ The scanner supports:
 * configurable batch size,
 * configurable sleep between batches,
 * configurable classifier threshold,
+* mandatory repository-emptiness gating for scan matches,
 * dry-run mode,
 * optional maximum repositories per scan,
 * scan IDs for grouping results.
@@ -445,7 +481,8 @@ preview workflow must be read-only with respect to Quay:
 * run the same Bayesian classifier used by service-tool scans and Quay ingress;
 * return paginated matching repositories with namespace, repository name,
   description excerpt, classifier score, explanation details,
-  empty-repository status, and other configured feature inputs;
+  empty-repository status, hard-filter results, and other configured feature
+  inputs;
 * show aggregate counts for repositories scanned and matched;
 * avoid writes to Quay repository data;
 * avoid writes to service-tool run, match, or quarantine history.
@@ -610,8 +647,8 @@ including:
 
 ## Risks and Mitigations
 
-* **False positives:** Quarantine is reversible, dry-run mode is available, and
-  automatic deletion is out of scope.
+* **False positives:** Scan matches require an empty repository, quarantine is
+  reversible, dry-run mode is available, and automatic deletion is out of scope.
 * **Classifier drift:** The service tool records training examples, classifier
   versions, policy snapshots, and review outcomes so operators can understand
   what changed between runs.
@@ -654,6 +691,9 @@ The `quay-service-tool` implementation should be tested in its own repository:
 * backend pytest coverage for preview workflows against the read-only replica;
 * backend pytest coverage for scan execution, dry-run persistence, run history,
   match history, and review queue filtering;
+* backend pytest coverage proving non-empty repositories are excluded from
+  preview results, scan match history, review queue entries, and quarantine
+  actions even when the classifier score exceeds the scan threshold;
 * backend pytest coverage for quarantine, restore, dismiss, and redaction
   lifecycle transitions;
 * backend pytest coverage for role gating between preview/reporting and
@@ -800,3 +840,6 @@ manageable.
 * 2026-07-03 Clarified that quarantined repository descriptions are replaced
   with a restore-contact notice and that Quay consumes a JSON classifier
   artifact baked into the image.
+* 2026-07-07 Required empty repositories for scan matches and quarantine-review
+  eligibility and documented additional hard identifiers for reducing false
+  positives.
