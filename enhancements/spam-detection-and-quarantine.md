@@ -208,6 +208,8 @@ Policy should include:
 * whether automated scans are dry-run only;
 * whether matches should only be recorded or also moved into the service-tool
   review queue;
+* whether repositories with terminal review records should be rescanned when
+  the repository description and active classifier artifact have not changed;
 * the standard quarantine notice used by approved quarantine actions, including
   restoration contact instructions, remediation requirements, and expected
   review timelines;
@@ -404,6 +406,9 @@ Quarantine records should also be service-tool owned:
 | `quarantine_description` | Standard quarantine notice written to Quay during quarantine |
 | `classifier_score` | Score that caused the repository to be flagged |
 | `classifier_snapshot` | Classifier metadata used for the decision |
+| `description_fingerprint` | Stable digest of the description evaluated by the classifier |
+| `terminal_classifier_snapshot` | Classifier metadata active when the record entered a terminal review status |
+| `terminal_description_fingerprint` | Stable digest of the description when the record entered a terminal review status |
 | `run_id` | Run that produced the record, if any |
 | `actioned_by`, `actioned_at` | Last administrative action metadata |
 | `created_at`, `updated_at` | Timestamps |
@@ -423,6 +428,32 @@ back to Quay from the service-tool quarantine record. Dismissal closes the
 review record without modifying repository content beyond any already-applied
 quarantine action. Redaction is permanent cleanup and writes directly to the
 Quay repository record while preserving service-tool action history.
+
+Terminal review actions should also be available as classifier feedback for the
+next model version. A dismissed or restored repository is evidence that the
+current classifier produced a false positive and should be recorded as a `ham`
+training example using the reviewed description. A quarantined or redacted
+repository is evidence that the classifier found true spam and should be
+recorded as a `spam` training example using the original description captured
+before quarantine or redaction. The service tool should persist these examples
+with source metadata that links them to the review record and action history.
+When an operator later initiates retraining for that classifier, review-derived
+examples should be included in the training corpus by default unless an
+operator has explicitly removed or excluded them. Review actions should not
+automatically retrain, export, or deploy a new classifier as part of the
+action.
+
+Terminal review records should suppress repeated review noise for unchanged
+repositories. By default, a repository whose latest review record is
+`dismissed`, `restored`, or `redacted` should not be opened as a new review
+record on a later scan when both the evaluated description fingerprint and the
+active classifier artifact version/checksum match the terminal record. The
+repository becomes eligible for review again if the repository description
+changes, if a new classifier artifact is active, or if service-tool policy
+explicitly enables rescanning terminal records. This suppression applies to
+review-record creation; scan implementations may still record aggregate skip
+counts or diagnostic metadata so operators can understand why a repository was
+not reopened.
 
 When an existing repository is moved to `quarantined`, the service tool should
 replace the repository description with a standard quarantine notice. The
@@ -484,6 +515,8 @@ The scanner supports:
 * configurable sleep between batches,
 * configurable classifier threshold,
 * mandatory repository-emptiness gating for scan matches,
+* terminal-review suppression for unchanged repositories that were dismissed,
+  restored, or redacted by an operator,
 * dry-run mode,
 * optional maximum repositories per scan,
 * scan IDs for grouping results.
@@ -572,6 +605,7 @@ Configuration keys:
 | `SPAM_DETECTION_SLEEP_BETWEEN_BATCHES` | `0.5` | service tool | Delay between scan batches |
 | `SPAM_DETECTION_SCAN_DRY_RUN` | `true` | service tool | Report matches without opening quarantine records or changing Quay content |
 | `SPAM_DETECTION_MAX_REPOS` | `0` | service tool | Max repositories per scan, where `0` means unlimited |
+| `SPAM_DETECTION_RESCAN_TERMINAL_RECORDS` | `false` | service tool | Reopen dismissed, restored, or redacted repositories only when the description or active classifier artifact changes unless explicitly enabled |
 | `SPAM_DETECTION_MIN_SPAM_EXAMPLES` | deployment-defined | service tool | Minimum spam examples required before training/exporting an ingress artifact |
 | `SPAM_DETECTION_MIN_HAM_EXAMPLES` | deployment-defined | service tool | Minimum ham examples required before training/exporting an ingress artifact |
 
@@ -886,3 +920,5 @@ manageable.
 * 2026-07-07 Required empty repositories for scan matches and quarantine-review
   eligibility and documented additional hard identifiers for reducing false
   positives.
+* 2026-07-10 Added terminal-review rescan suppression and review-action
+  feedback for future classifier training.
