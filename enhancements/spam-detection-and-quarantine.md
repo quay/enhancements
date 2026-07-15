@@ -7,7 +7,7 @@ reviewers:
 approvers:
   - TBD
 creation-date: 2026-06-12
-last-updated: 2026-07-07
+last-updated: 2026-07-15
 status: implementable
 ---
 
@@ -145,10 +145,13 @@ The classifier should evaluate repository descriptions as the primary signal.
 For service-tool scans, repository emptiness is a mandatory eligibility check,
 not just a weighted classifier feature: a repository must have no pushed image
 content at scan time before it can be recorded as a spam match, moved into the
-review queue, or quarantined. The implementation may include supporting
-features such as repository name, namespace/account age, URL count, token
-frequency, and description length, provided the classifier can explain which
-features contributed to a match well enough for operator review.
+review queue, or quarantined. Hyperlink presence is also a mandatory eligibility
+check for both service-tool matches and Quay ingress rejection: a description
+without a recognized HTTP or HTTPS hyperlink must not be treated as spam even
+when its Bayesian score exceeds the applicable threshold. The implementation
+may include supporting features such as repository name, namespace/account age,
+URL count, token frequency, and description length, provided the classifier can
+explain which features contributed to a match well enough for operator review.
 
 Classifier configuration stored by the service tool should include:
 
@@ -204,7 +207,8 @@ Policy should include:
   policy treated as the source of truth for generated Quay ingress artifacts;
 * scan filters such as namespace scope, repository visibility, repository
   emptiness, and maximum repositories per run, where repository emptiness is
-  required for scan matches and quarantine-review eligibility;
+  required for scan matches and quarantine-review eligibility and a maximum of
+  `0`/`All` explicitly means an unbounded scan;
 * whether automated scans are dry-run only;
 * whether matches should only be recorded or also moved into the service-tool
   review queue;
@@ -231,8 +235,9 @@ identifiers for reducing false positives include:
   new empty repositories are higher-signal than long-lived empty repositories;
 * non-exempt namespace status, so trusted, internal, paid, or operator-managed
   namespaces can be excluded before classification;
-* external URL presence or URL count above a configurable threshold, because
-  spam descriptions commonly redirect users away from the registry;
+* external URL count above a configurable threshold, in addition to the
+  mandatory hyperlink-presence check, because spam descriptions commonly
+  redirect users away from the registry;
 * lack of retained successful push/build activity where audit data is available,
   as a secondary confirmation that the repository has not hosted legitimate
   image content;
@@ -288,6 +293,9 @@ The service-tool spam detection section should support:
 * listing classifier configurations with enabled state, thresholds, model
   version, timestamps, and last editor if available;
 * creating or importing training examples;
+* labeling an existing scan/review match as `spam` or `ham` so its reviewed
+  description becomes a linked training example without requiring a quarantine
+  or dismissal action;
 * retraining or refreshing the Bayesian model from approved examples;
 * configuring scan and ingress thresholds;
 * configuring scan filters and dry-run behavior, with repository emptiness always
@@ -307,6 +315,9 @@ The service-tool review queue should support the human remediation loop:
 * show model score, explanation details, description excerpt, current status,
   and original description where available;
 * require confirmation for quarantine, restore, dismiss, and redaction actions;
+* allow an operator to reopen an accidentally dismissed or restored record as
+  `flagged`, with a required audit reason and invalidation of the incorrect ham
+  feedback created by the terminal action;
 * use explicit write-capable paths for quarantine, restore, and redaction;
 * refresh the affected row after completion;
 * avoid bulk redaction in the first implementation unless a separate job or
@@ -322,6 +333,7 @@ service-tool UI:
 | `PUT /spam-detection/classifiers/<uuid>` | Edit classifier settings or enabled state | service-tool state DB |
 | `POST /spam-detection/classifiers/<uuid>/train` | Retrain from approved examples | service-tool state DB |
 | `POST /spam-detection/classifiers/<uuid>/export-artifact` | Export the trained model with the active ingress policy embedded in a versioned artifact | service-tool state DB |
+| `GET /spam-detection/classifiers/<uuid>/artifact` | Download the latest generated artifact as an attachment | service-tool state DB plus artifact storage |
 | `GET /spam-detection/policy` | Read active action policy | service-tool state DB |
 | `PUT /spam-detection/policy` | Update action policy | service-tool state DB |
 | `POST /spam-detection/preview` | Preview a classifier and policy draft | read-only Quay DB replica plus service-tool state DB |
@@ -332,6 +344,8 @@ service-tool UI:
 | `POST /spam-detection/review/<uuid>/quarantine` | Apply quarantine to a flagged repository | service-tool state DB plus write-capable Quay DB |
 | `POST /spam-detection/review/<uuid>/restore` | Restore a quarantined repository | service-tool state DB plus write-capable Quay DB |
 | `POST /spam-detection/review/<uuid>/dismiss` | Dismiss a flagged or quarantined repository | service-tool state DB |
+| `POST /spam-detection/review/<uuid>/classify` | Label the reviewed description as spam or ham training feedback | service-tool state DB |
+| `POST /spam-detection/review/<uuid>/reopen` | Return an accidentally dismissed or restored record to flagged review | service-tool state DB plus read-only Quay DB validation |
 | `POST /spam-detection/review/<uuid>/redact` | Permanently redact approved spam content | service-tool state DB plus write-capable Quay DB |
 
 The existing service-tool backend configures Quay's global Peewee database once
@@ -420,6 +434,8 @@ The quarantine lifecycle is explicit:
 * `quarantined` -> `restored`
 * `quarantined` -> `dismissed`
 * `quarantined` -> `redacted`
+* `restored` -> `flagged` with an audit reason
+* `dismissed` -> `flagged` with an audit reason
 
 Invalid transitions should raise a service-tool error. Quarantine stores the
 original repository description in service-tool state and applies the approved
@@ -442,6 +458,11 @@ examples should be included in the training corpus by default unless an
 operator has explicitly removed or excluded them. Review actions should not
 automatically retrain, export, or deploy a new classifier as part of the
 action.
+
+Explicit spam/ham labels applied to existing matches should create training
+examples linked to the review record and operator action. Labeling supplies
+classifier feedback only; it must not implicitly quarantine, restore, dismiss,
+redact, or otherwise change the review status.
 
 Terminal review records should suppress repeated review noise for unchanged
 repositories. By default, a repository whose latest review record is
@@ -617,6 +638,8 @@ threshold embedded in the service-tool-generated artifact, subject to Quay's
 `FEATURE_SPAM_DETECTION` and `SPAM_DETECTION_DRY_RUN` settings. The service-tool
 policy is the source of truth for that threshold; Quay only consumes the
 versioned local artifact and never calls service-tool on the request path.
+Quay must require at least one recognized HTTP or HTTPS hyperlink in the
+proposed description before a score can cause an ingress rejection.
 
 The supported production artifact handoff is build-time export into the Quay
 image. `quay-service-tool` exports the active classifier/policy artifact as a
@@ -661,7 +684,11 @@ request-local fields available on the create/update path. When enforcement is
 enabled, rejections should return a clear validation error. Quay should avoid
 persisting spam-specific state for ingress decisions in new Quay tables.
 Operational visibility for classifier behavior should come from service-tool
-preview, scan history, and standard Quay logs or metrics.
+preview and scan history, plus standard Quay logs and low-cardinality Prometheus
+metrics. Quay must emit an ingress decision counter that distinguishes create
+from update and blocked from allowed, dry-run, fail-open, and fail-closed
+outcomes without using namespace, repository, description, or other
+high-cardinality labels.
 
 ### Audit Logging and Notifications
 
@@ -755,24 +782,34 @@ The Quay backend implementation should include pytest coverage for:
 * ingress dry-run behavior when `FEATURE_SPAM_DETECTION=true` and
   `SPAM_DETECTION_DRY_RUN=true`;
 * ingress rejection behavior when enforcement is enabled;
+* hyperlink gating that allows a high-scoring description without an HTTP or
+  HTTPS hyperlink and rejects the same content when a hyperlink is present;
 * classifier unavailability behavior for the configured fail-open/fail-closed
   mode;
-* create and update request validation errors for rejected descriptions;
+* create and update request behavior for feature-disabled, dry-run, and
+  enforced rejection modes;
+* ingress metric outcomes for blocked, dry-run, and classifier-unavailable
+  requests;
 * configuration schema validation for Quay-owned spam detection keys.
 
 The `quay-service-tool` implementation should be tested in its own repository:
 
 * backend pytest coverage for classifier configuration, training examples,
   retraining or model refresh, active-policy threshold embedding, policy
-  changes, artifact export, and validation;
+  changes, artifact export/download, and validation;
 * backend pytest coverage for preview workflows against the read-only replica;
 * backend pytest coverage for scan execution, dry-run persistence, run history,
   match history, and review queue filtering;
 * backend pytest coverage proving non-empty repositories are excluded from
   preview results, scan match history, review queue entries, and quarantine
   actions even when the classifier score exceeds the scan threshold;
-* backend pytest coverage for quarantine, restore, dismiss, and redaction
-  lifecycle transitions;
+* backend pytest coverage proving descriptions without hyperlinks are excluded
+  from preview and scan matches even when the classifier score exceeds the scan
+  threshold;
+* backend pytest coverage for quarantine, restore, dismiss, reopen, explicit
+  spam/ham labeling, and redaction lifecycle transitions;
+* backend pytest coverage for bounded scans and the explicit `0`/`All`
+  unbounded scan mode;
 * backend pytest coverage for role gating between preview/reporting and
   write/remediation actions;
 * backend pytest coverage for read-only replica path selection for
@@ -922,3 +959,6 @@ manageable.
   positives.
 * 2026-07-10 Added terminal-review rescan suppression and review-action
   feedback for future classifier training.
+* 2026-07-15 Required hyperlink eligibility and Quay ingress metrics, added
+  artifact downloads and explicit match labels, generalized terminal-action
+  recovery, and documented unbounded scans and update-path coverage.
