@@ -119,6 +119,13 @@ tool is responsible for all spam-specific database changes, including
 classifier configuration, training examples, scan runs, scan matches,
 quarantine records, action history, and redaction history.
 
+The service-tool state database and managed classifier artifacts are durable
+operational state and must share a persistent data directory. Production
+deployments should mount that directory from persistent storage, include it in
+backup and restore procedures, and run a single service-tool replica while a
+local SQLite state database is used. The classifier JSON must not be committed
+to the service-tool source repository.
+
 The service tool's interaction with the Quay database is intentionally narrow:
 
 * read repository descriptions and supporting repository metadata for
@@ -174,6 +181,16 @@ needs bounded repository text, label (`spam` or `ham`), source
 identity where available, and timestamps. The service tool should support model
 retraining or model refresh from those examples without requiring a Quay
 database migration.
+
+The service tool should support importing a validated classifier JSON artifact
+as an immutable base model. It should preserve the imported bytes and checksum,
+make the selected artifact immediately available to manual preview and scan
+operations, and retain its model snapshot as the base for later versions.
+Operator-initiated retraining should combine that base snapshot with all active
+service-tool feedback without double-counting feedback from earlier retraining
+runs. The newly trained version should become available to manual scans without
+an export step. Export is only required to promote a selected version into the
+Quay image used for ingress blocking.
 
 The service tool should enforce minimum corpus quality gates before exporting a
 classifier artifact for ingress use. At minimum, the corpus must contain
@@ -292,6 +309,8 @@ The service-tool spam detection section should support:
 
 * listing classifier configurations with enabled state, thresholds, model
   version, timestamps, and last editor if available;
+* importing, activating, downloading, and checksum-verifying classifier JSON
+  artifacts without storing private artifact content in Git;
 * creating or importing training examples;
 * labeling an existing scan/review match as `spam` or `ham` so its reviewed
   description becomes a linked training example without requiring a quarantine
@@ -305,6 +324,8 @@ The service-tool spam detection section should support:
 * showing how many repositories would match the current policy draft before it
   is enabled;
 * showing classifier and policy snapshots used by historical runs;
+* showing the exact reviewed description, canonical training label, and a link
+  to the corresponding Quay repository in active and closed review tables;
 * recording enough metadata to audit who changed classifier or policy settings
   and when.
 
@@ -445,14 +466,19 @@ review record without modifying repository content beyond any already-applied
 quarantine action. Redaction is permanent cleanup and writes directly to the
 Quay repository record while preserving service-tool action history.
 
-Terminal review actions should also be available as classifier feedback for the
-next model version. A dismissed or restored repository is evidence that the
-current classifier produced a false positive and should be recorded as a `ham`
-training example using the reviewed description. A quarantined or redacted
-repository is evidence that the classifier found true spam and should be
-recorded as a `spam` training example using the original description captured
-before quarantine or redaction. The service tool should persist these examples
-with source metadata that links them to the review record and action history.
+Review decisions should also be available as classifier feedback for the next
+model version. Each review record must have at most one active canonical
+training decision. A dismissed or restored repository is evidence that the
+current classifier produced a false positive and sets that decision to `ham`
+using the reviewed description. A quarantined or redacted repository is
+evidence that the classifier found true spam and sets the decision to `spam`
+using the original description captured before quarantine or redaction. A
+later decision replaces and invalidates the prior active example instead of
+leaving contradictory spam and ham examples for the same review record. The
+service tool should persist decision history and source metadata that links the
+active example and its superseded predecessors to the review record and audit
+actions.
+
 When an operator later initiates retraining for that classifier, review-derived
 examples should be included in the training corpus by default unless an
 operator has explicitly removed or excluded them. Review actions should not
@@ -460,9 +486,14 @@ automatically retrain, export, or deploy a new classifier as part of the
 action.
 
 Explicit spam/ham labels applied to existing matches should create training
-examples linked to the review record and operator action. Labeling supplies
-classifier feedback only; it must not implicitly quarantine, restore, dismiss,
-redact, or otherwise change the review status.
+decisions linked to the review record and operator action. Explicit labeling is
+only available while a record is `flagged`; after a remediation decision, the
+remediation-derived label is authoritative. Labeling supplies classifier
+feedback only and must not implicitly quarantine, restore, dismiss, redact, or
+otherwise change review status. Reopening a mistaken restore or dismissal must
+invalidate its ham decision and return the record to an unlabeled `flagged`
+state; the next explicit or remediation decision establishes the new canonical
+label.
 
 Terminal review records should suppress repeated review noise for unchanged
 repositories. By default, a repository whose latest review record is
@@ -619,6 +650,7 @@ Configuration keys:
 | `SPAM_DETECTION_CLASSIFIER_VERSION` | unset | Quay | Expected classifier/policy version for ingress evaluation |
 | `SPAM_DETECTION_CLASSIFIER_SHA256` | unset | Quay | Optional SHA-256 checksum for the local classifier artifact |
 | `SPAM_DETECTION_FAIL_OPEN` | `true` | Quay | Allows repository updates if the ingress classifier is unavailable |
+| `SPAM_DETECTION_DATA_DIR` | deployment-defined persistent path | service tool | Parent directory containing the service-tool state database and managed classifier artifacts; the whole directory must be persisted and backed up |
 | `SPAM_DETECTION_READONLY_DB_URI` | unset | service tool | Read-only Quay replica used for preview and scans |
 | `SPAM_DETECTION_WRITE_DB_URI` | unset | service tool | Write-capable Quay DB path for approved quarantine, restore, and redaction |
 | `SPAM_DETECTION_QUARANTINE_DESCRIPTION` | deployment-provided notice | service tool | Standard quarantine notice written by approved quarantine actions |
@@ -807,7 +839,8 @@ The `quay-service-tool` implementation should be tested in its own repository:
   from preview and scan matches even when the classifier score exceeds the scan
   threshold;
 * backend pytest coverage for quarantine, restore, dismiss, reopen, explicit
-  spam/ham labeling, and redaction lifecycle transitions;
+  spam/ham labeling, canonical feedback replacement, contradictory-label
+  prevention, and redaction lifecycle transitions;
 * backend pytest coverage for bounded scans and the explicit `0`/`All`
   unbounded scan mode;
 * backend pytest coverage for role gating between preview/reporting and
@@ -824,8 +857,12 @@ The `quay-service-tool` implementation should be tested in its own repository:
 * service-tool migration tests for classifier, training, run, match,
   quarantine, and action-history tables and indexes;
 * frontend unit coverage for classifier configuration, policy editing,
-  preview, run-history views, review queue actions, and API error states using
-  the existing `HttpService` mocking pattern.
+  preview, run-history views, reviewed descriptions, canonical labels,
+  repository links, review queue actions, and API error states using the
+  existing `HttpService` mocking pattern;
+* a seeded local manual-exploration workflow that starts Quay and service-tool,
+  imports the configured classifier, creates review data, opens both UIs, signs
+  in, and then performs no automated review actions.
 
 No Quay UI tests are required for this enhancement because the Quay application
 does not add an in-tree UI surface.
@@ -962,3 +999,7 @@ manageable.
 * 2026-07-15 Required hyperlink eligibility and Quay ingress metrics, added
   artifact downloads and explicit match labels, generalized terminal-action
   recovery, and documented unbounded scans and update-path coverage.
+* 2026-07-15 Added persistent service-tool classifier storage, validated
+  artifact import and base-model retraining, immediate use of trained versions
+  for manual scans, canonical review feedback, visible review descriptions and
+  repository links, and a seeded manual-exploration workflow.
