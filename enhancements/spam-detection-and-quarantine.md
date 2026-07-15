@@ -315,6 +315,9 @@ The service-tool spam detection section should support:
 * labeling an existing scan/review match as `spam` or `ham` so its reviewed
   description becomes a linked training example without requiring a quarantine
   or dismissal action;
+* inspecting a repository that a scan missed and, after an operator supplies a
+  reason, adding an eligible false negative to the review queue as canonical
+  spam training feedback without automatically quarantining it;
 * retraining or refreshing the Bayesian model from approved examples;
 * configuring scan and ingress thresholds;
 * configuring scan filters and dry-run behavior, with repository emptiness always
@@ -339,6 +342,11 @@ The service-tool review queue should support the human remediation loop:
 * allow an operator to reopen an accidentally dismissed or restored record as
   `flagged`, with a required audit reason and invalidation of the incorrect ham
   feedback created by the terminal action;
+* allow an operator to inspect a repository by namespace and name, including its
+  current description, score, threshold, and hard-filter results, then add an
+  eligible false negative as `flagged` with a required audit reason; this path
+  may bypass only the classifier threshold and must still enforce active,
+  visibility, empty-repository, and hyperlink requirements;
 * use explicit write-capable paths for quarantine, restore, and redaction;
 * refresh the affected row after completion;
 * avoid bulk redaction in the first implementation unless a separate job or
@@ -362,6 +370,8 @@ service-tool UI:
 | `GET /spam-detection/runs` | List historical runs | service-tool state DB |
 | `GET /spam-detection/runs/<uuid>/matches` | List repository matches for a run | service-tool state DB |
 | `GET /spam-detection/review` | List active flagged/quarantined repositories | service-tool state DB |
+| `POST /spam-detection/review/manual/inspect` | Inspect a possible false negative without changing review state | read-only Quay DB plus service-tool state DB |
+| `POST /spam-detection/review/manual` | Add an eligible false negative as flagged review and canonical spam feedback | read-only Quay DB plus service-tool state DB |
 | `POST /spam-detection/review/<uuid>/quarantine` | Apply quarantine to a flagged repository | service-tool state DB plus write-capable Quay DB |
 | `POST /spam-detection/review/<uuid>/restore` | Restore a quarantined repository | service-tool state DB plus write-capable Quay DB |
 | `POST /spam-detection/review/<uuid>/dismiss` | Dismiss a flagged or quarantined repository | service-tool state DB |
@@ -841,6 +851,9 @@ The `quay-service-tool` implementation should be tested in its own repository:
 * backend pytest coverage for quarantine, restore, dismiss, reopen, explicit
   spam/ham labeling, canonical feedback replacement, contradictory-label
   prevention, and redaction lifecycle transitions;
+* backend pytest coverage for inspecting and manually adding below-threshold
+  false negatives, including required reasons, hard-filter enforcement,
+  canonical spam feedback, audit history, and subsequent quarantine;
 * backend pytest coverage for bounded scans and the explicit `0`/`All`
   unbounded scan mode;
 * backend pytest coverage for role gating between preview/reporting and
@@ -858,8 +871,8 @@ The `quay-service-tool` implementation should be tested in its own repository:
   quarantine, and action-history tables and indexes;
 * frontend unit coverage for classifier configuration, policy editing,
   preview, run-history views, reviewed descriptions, canonical labels,
-  repository links, review queue actions, and API error states using the
-  existing `HttpService` mocking pattern;
+  repository links, false-negative intake, review queue actions, and API error
+  states using the existing `HttpService` mocking pattern;
 * a seeded local manual-exploration workflow that starts Quay and service-tool,
   imports the configured classifier, creates review data, opens both UIs, signs
   in, and then performs no automated review actions.
@@ -1003,3 +1016,6 @@ manageable.
   artifact import and base-model retraining, immediate use of trained versions
   for manual scans, canonical review feedback, visible review descriptions and
   repository links, and a seeded manual-exploration workflow.
+* 2026-07-15 Added audited false-negative intake so eligible repositories missed
+  by the active threshold can enter review and future training without being
+  quarantined automatically.
