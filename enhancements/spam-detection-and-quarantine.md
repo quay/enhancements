@@ -156,9 +156,15 @@ review queue, or quarantined. Hyperlink presence is also a mandatory eligibility
 check for both service-tool matches and Quay ingress rejection: a description
 without a recognized HTTP or HTTPS hyperlink must not be treated as spam even
 when its Bayesian score exceeds the applicable threshold. The implementation
-may include supporting features such as repository name, namespace/account age,
-URL count, token frequency, and description length, provided the classifier can
-explain which features contributed to a match well enough for operator review.
+must score long descriptions in bounded, overlapping token windows and use the
+highest window score. This prevents a high-confidence spam segment from being
+diluted by appending a large amount of link or boilerplate content. The initial
+defaults are 128 tokens per window with a 64-token stride; service-tool and Quay
+must apply identical values from the artifact feature configuration. The
+implementation may include supporting features such as repository name,
+namespace/account age, URL count, token frequency, and description length,
+provided the classifier can explain which features contributed to a match well
+enough for operator review.
 
 Classifier configuration stored by the service tool should include:
 
@@ -713,7 +719,7 @@ fields as the required artifact contract:
 | `smoothing` | number | Smoothing factor used for unseen tokens |
 | `ingress_threshold` | number | Default score threshold for ingress blocking |
 | `ingress_thresholds` | object | Visibility-specific ingress thresholds, such as public/private |
-| `feature_config` | object | Supported tokenizer and feature settings |
+| `feature_config` | object | Supported tokenizer and feature settings, including `classification_window_tokens` and `classification_window_stride` |
 | `training_metrics` | object | Corpus counts and validation metrics where available |
 
 Quay should reject or fail-open/fail-closed according to configuration when the
@@ -826,6 +832,8 @@ The Quay backend implementation should include pytest coverage for:
 * ingress rejection behavior when enforcement is enabled;
 * hyperlink gating that allows a high-scoring description without an HTTP or
   HTTPS hyperlink and rejects the same content when a hyperlink is present;
+* bounded window scoring that rejects spam even when a long link or boilerplate
+  suffix would lower the whole-description score;
 * classifier unavailability behavior for the configured fail-open/fail-closed
   mode;
 * create and update request behavior for feature-disabled, dry-run, and
@@ -848,6 +856,8 @@ The `quay-service-tool` implementation should be tested in its own repository:
 * backend pytest coverage proving descriptions without hyperlinks are excluded
   from preview and scan matches even when the classifier score exceeds the scan
   threshold;
+* backend pytest coverage proving service-tool uses the same bounded window
+  scoring as Quay and reports the highest-scoring window in match explanations;
 * backend pytest coverage for quarantine, restore, dismiss, reopen, explicit
   spam/ham labeling, canonical feedback replacement, contradictory-label
   prevention, and redaction lifecycle transitions;
@@ -1019,3 +1029,5 @@ manageable.
 * 2026-07-15 Added audited false-negative intake so eligible repositories missed
   by the active threshold can enter review and future training without being
   quarantined automatically.
+* 2026-07-15 Added bounded overlapping classifier windows to prevent long link
+  or boilerplate suffixes from diluting an otherwise high-confidence spam score.
