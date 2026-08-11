@@ -55,6 +55,7 @@ Quay → Workload: returns a scoped OAuth bearer token, or rejects the request w
 
 *Trust boundary: a valid Kubernetes identity is not, by itself, Quay authorization. Quay must apply
 an explicit authorization decision before minting a token.*
+<img width="2683" height="1875" alt="Untitled-2026-08-04-1448(1)" src="https://github.com/user-attachments/assets/487ae9b7-0aef-4e50-99a2-a65558bb2c51" />
 
 ## 4. Validation approach
 
