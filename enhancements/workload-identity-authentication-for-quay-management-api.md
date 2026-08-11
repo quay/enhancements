@@ -19,11 +19,13 @@ see-also:
 
 ## Status
 
-*First draft for architecture review. This document captures the proposed boundaries and unresolved decisions; it is not an implementation plan.*
+*First draft for architecture review. This document captures the proposed boundaries and unresolved
+decisions; it is not an implementation plan.*
 
 ## 1. Purpose
 
-Enable Kubernetes workloads to obtain scoped Quay Management API OAuth tokens using their ServiceAccount identity, without storing a shared Quay administrative credential.
+Enable Kubernetes workloads to obtain scoped Quay Management API OAuth tokens using their
+ServiceAccount identity, without storing a shared Quay administrative credential.
 
 ## 2. Goals and non-goals
 
@@ -46,26 +48,35 @@ Workload → Quay Management API: presents a ServiceAccount bearer token and req
 
 Quay → Kubernetes API: validates the token through TokenReview (provisional recommendation).
 
-Quay: resolves the validated identity, applies the selected Quay authorization mapping, and reuses the existing organization token endpoint/lifecycle.
+Quay: resolves the validated identity, applies the selected Quay authorization mapping, and reuses
+the existing organization token endpoint/lifecycle.
 
 Quay → Workload: returns a scoped OAuth bearer token, or rejects the request without issuing one.
 
-*Trust boundary: a valid Kubernetes identity is not, by itself, Quay authorization. Quay must apply an explicit authorization decision before minting a token.*
+*Trust boundary: a valid Kubernetes identity is not, by itself, Quay authorization. Quay must apply
+an explicit authorization decision before minting a token.*
 
 ## 4. Validation approach
 
-*Working recommendation:* Kubernetes API validation using TokenReview, followed by Quay-side authorization. This keeps Kubernetes as the authority for ServiceAccount token validity and rotation.
+*Working recommendation:* Kubernetes API validation using TokenReview, followed by Quay-side
+authorization. This keeps Kubernetes as the authority for ServiceAccount token validity and
+rotation.
 
-*Alternative for review:* locally validate the JWT using issuer, signature, audience, and claims. This may reduce API dependency but makes issuer/key-discovery, revocation semantics, and trust configuration Quay concerns.
+*Alternative for review:* locally validate the JWT using issuer, signature, audience, and claims.
+This may reduce API dependency but makes issuer/key-discovery, revocation semantics, and trust
+configuration Quay concerns.
 
 ## 5. Authorization mapping — open decision
 
 How should a validated identity map to a Quay subject and allowed Management API scopes?
 
-- Explicit configured mapping: cluster/namespace/ServiceAccount → Quay identity + scopes. Strong auditability; more configuration.
+- Explicit configured mapping: cluster/namespace/ServiceAccount → Quay identity + scopes. Strong
+  auditability; more configuration.
 - Namespace-based defaults: convenient conventions; risk of unintended access.
-- Kubernetes RBAC-driven mapping: aligns with Kubernetes permissions; scope translation is complex and may couple systems.
-- Quay identity per ServiceAccount: clear attribution; introduces identity lifecycle and cleanup questions.
+- Kubernetes RBAC-driven mapping: aligns with Kubernetes permissions; scope translation is complex and
+  may couple systems.
+- Quay identity per ServiceAccount: clear attribution; introduces identity lifecycle and cleanup
+  questions.
 
 ### 5.1 Authorization decision: SAR or explicit mapping
 
@@ -73,15 +84,21 @@ The design must choose how a validated Kubernetes ServiceAccount becomes authori
 
 #### Option A — Kubernetes SubjectAccessReview (SAR)
 
-Quay validates the ServiceAccount with TokenReview, then asks Kubernetes SAR whether the identity may perform a defined action. This makes Kubernetes RBAC the authorization authority.
+Quay validates the ServiceAccount with TokenReview, then asks Kubernetes SAR whether the identity
+may perform a defined action. This makes Kubernetes RBAC the authorization authority.
 
 **Advantages:** reuses Kubernetes RBAC and avoids introducing a second mapping model.
 
-**Concerns:** Kubernetes verbs/resources do not map naturally to Quay repository, organization, and **Management API** scopes; it adds another Kubernetes API dependency and call; and it makes Quay permissions indirect and harder to audit. **SAR** is appropriate only if the product deliberately defines Kubernetes RBAC as the source of truth for Quay access.
+**Concerns:** Kubernetes verbs/resources do not map naturally to Quay repository, organization, and
+**Management API** scopes; it adds another Kubernetes API dependency and call; and it makes Quay
+permissions indirect and harder to audit. **SAR** is appropriate only if the product deliberately
+defines Kubernetes RBAC as the source of truth for Quay access.
 
 #### Option B — Explicit administrator-controlled mapping (preferred working direction)
 
-Quay validates the ServiceAccount with TokenReview, then looks up an administrator-created mapping from cluster identity, namespace, and ServiceAccount to a Quay subject and an allow-list of Quay scopes.
+Quay validates the ServiceAccount with TokenReview, then looks up an administrator-created mapping
+from cluster identity, namespace, and ServiceAccount to a Quay subject and an allow-list of Quay
+scopes.
 
 **The mapping must explicitly define:**
 
@@ -93,36 +110,49 @@ Quay validates the ServiceAccount with TokenReview, then looks up an administrat
 
 #### What is the mapping object?
 
-Preferred for Operator-managed deployments: a dedicated Kubernetes CRD, for example WorkloadIdentityMapping, managed declaratively by the Quay Operator. The Operator validates the object and delivers a normalized mapping to Quay; Quay remains responsible for token issuance and Quay-scope enforcement.
+Preferred for Operator-managed deployments: a dedicated Kubernetes CRD, for example
+WorkloadIdentityMapping, managed declaratively by the Quay Operator. The Operator validates the
+object and delivers a normalized mapping to Quay; Quay remains responsible for token issuance and
+Quay-scope enforcement.
 
 **Other representations to evaluate:**
 
-- Quay-native configuration values: suitable for standalone or non-Kubernetes Quay, but less GitOps- and namespace-native.
+- Quay-native configuration values: suitable for standalone or non-Kubernetes Quay, but less GitOps-
+  and namespace-native.
 - A ConfigMap: easy to deploy, but weakly typed and not ideal for validation or lifecycle status.
-- A Secret: not appropriate for the mapping itself; it may hold credentials but should not be the policy interface.
-- An administrative Quay API/UI: useful for standalone administration, but requires a separate Kubernetes integration path.
+- A Secret: not appropriate for the mapping itself; it may hold credentials but should not be the
+  policy interface.
+- An administrative Quay API/UI: useful for standalone administration, but requires a separate
+  Kubernetes integration path.
 
 #### Decision guidance
 
-Use SAR only if Kubernetes RBAC is intentionally the policy authority. Otherwise, use an **explicit mapping**, preferably a Quay Operator-managed CRD for Kubernetes deployments plus an equivalent Quay-native configuration mechanism for standalone deployments.
+Use SAR only if Kubernetes RBAC is intentionally the policy authority. Otherwise, use an **explicit
+mapping**, preferably a Quay Operator-managed CRD for Kubernetes deployments plus an equivalent
+Quay-native configuration mechanism for standalone deployments.
 
 ## 6. Token issuance
 
-*Working assumption:* reuse the existing organization token CRUD/issuance endpoint and OAuth lifecycle. Workload identity changes how the caller is authenticated; it does not create a second token format or lifecycle.
+*Working assumption:* reuse the existing organization token CRUD/issuance endpoint and OAuth
+lifecycle. Workload identity changes how the caller is authenticated; it does not create a second
+token format or lifecycle.
 
 ## 7. Compatibility and rollout
 
 - Additive feature, gated by FEATURE_KUBERNETES_SA_BOOTSTRAP and off by default.
-- Existing authentication and programmatic bootstrap remain functional when workload identity is disabled.
+- Existing authentication and programmatic bootstrap remain functional when workload identity is
+  disabled.
 - Existing bootstrap credentials and workload identity may coexist during adoption.
 - Migration or deprecation of shared bootstrap credentials is intentionally open.
 
 ## 8. Focused security decisions
 
 - Reject unknown, invalid, expired, or untrusted identities before token issuance.
-- Enforce requested scopes against the workload’s authorized scopes; never grant broader access by default.
+- Enforce requested scopes against the workload’s authorized scopes; never grant broader access by
+  default.
 - Preserve token expiration, revocation, and audit behavior.
-- Record successful issuance and rejected attempts with enough identity and reason context for investigation, without logging bearer tokens.
+- Record successful issuance and rejected attempts with enough identity and reason context for
+  investigation, without logging bearer tokens.
 - Define replay and audience requirements for presented ServiceAccount tokens.
 
 ## 9. Open questions
@@ -138,4 +168,5 @@ Use SAR only if Kubernetes RBAC is intentionally the policy authority. Otherwise
 
 ## Review outcome sought
 
-Agree on the trust/validation boundary, authorization mapping direction, endpoint reuse, and rollout assumptions before implementation design begins.
+Agree on the trust/validation boundary, authorization mapping direction, endpoint reuse, and rollout
+assumptions before implementation design begins.
