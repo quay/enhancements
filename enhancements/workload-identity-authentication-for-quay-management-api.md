@@ -55,7 +55,8 @@ Quay → Workload: returns a scoped OAuth bearer token, or rejects the request w
 
 *Trust boundary: a valid Kubernetes identity is not, by itself, Quay authorization. Quay must apply
 an explicit authorization decision before minting a token.*
-<img width="2683" height="1875" alt="Untitled-2026-08-04-1448(1)" src="https://github.com/user-attachments/assets/487ae9b7-0aef-4e50-99a2-a65558bb2c51" />
+<img width="2683" height="1875" alt="Untitled-2026-08-04-1448(1)"
+src="https://github.com/user-attachments/assets/487ae9b7-0aef-4e50-99a2-a65558bb2c51" />
 
 ## 4. Validation approach
 
@@ -145,7 +146,8 @@ expiration. The token then follows the existing Quay OAuth lifecycle, including 
 expiration, revocation, and audit behavior.
 
 The original prototype was rejected because it mapped a ServiceAccount JWT directly to a Quay robot
-identity instead of exchanging the JWT for a scoped OAuth token. Direct robot identity use would give
+identity instead of exchanging the JWT for a scoped OAuth token. Direct robot identity use would
+give
 the workload the robot's standing permissions rather than a separately scoped, time-limited token.
 The requested exchange is more secure when Quay enforces both an administrator-defined maximum scope
 set for the workload and the requested scope subset. This provides a least-privilege token boundary
@@ -168,6 +170,30 @@ without allowing the workload to grant itself additional Quay access.
 - Record successful issuance and rejected attempts with enough identity and reason context for
   investigation, without logging bearer tokens.
 - Define replay and audience requirements for presented ServiceAccount tokens.
+
+## Test Plan
+
+- **Unit tests:** Cover the authentication, mapping, scope, and token-issuance logic.
+- **Integration tests:** Verify Quay’s interaction with the configured Kubernetes identity-validation
+  mechanism and OAuth token store.
+- **End-to-end tests:** Validate the complete workload flow in a supported Kubernetes deployment:
+  - A configured ServiceAccount can exchange its JWT for a standard Quay OAuth token.
+  - The token can perform authorized Management API operations.
+  - The token cannot perform operations outside its granted scopes.
+  - Invalid, expired, wrong-audience, and unauthorized ServiceAccount tokens are rejected.
+  - Requests fail closed when identity validation or authorization is unavailable.
+  - Token expiration, revocation, and audit behavior work as expected.
+  - Existing programmatic bootstrap, human authentication, and non-Kubernetes flows remain unaffected.
+  - Operator-managed configuration, if supported, produces the expected Quay authorization behavior.
+- **Release confidence:** Test coverage includes upgrade/rollback or version-skew scenarios relevant
+  to the supported deployment model, and the workload-consumer and administrator documentation is
+  sufficient to configure and troubleshoot the feature.
+
+The core shipping bar is:
+
+> A real Kubernetes workload can obtain a scoped Quay OAuth token, use it successfully within its
+authorization boundary, and is reliably denied outside that boundary—without regressing existing
+authentication flows.
 
 ## 9. Open questions
 
