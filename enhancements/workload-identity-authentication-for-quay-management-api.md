@@ -138,6 +138,19 @@ Quay-native configuration mechanism for standalone deployments.
 lifecycle. Workload identity changes how the caller is authenticated; it does not create a second
 token format or lifecycle.
 
+The workload presents its ServiceAccount JWT together with the target organization and requested
+Quay scopes. Quay validates the workload identity, checks that the requested scopes are a subset of
+the scopes authorized for that identity, and returns a standard Quay OAuth bearer token with an
+expiration. The token then follows the existing Quay OAuth lifecycle, including scope enforcement,
+expiration, revocation, and audit behavior.
+
+The original prototype was rejected because it mapped a ServiceAccount JWT directly to a Quay robot
+identity instead of exchanging the JWT for a scoped OAuth token. Direct robot identity use would give
+the workload the robot's standing permissions rather than a separately scoped, time-limited token.
+The requested exchange is more secure when Quay enforces both an administrator-defined maximum scope
+set for the workload and the requested scope subset. This provides a least-privilege token boundary
+without allowing the workload to grant itself additional Quay access.
+
 ## 7. Compatibility and rollout
 
 - Additive feature, gated by FEATURE_KUBERNETES_SA_BOOTSTRAP and off by default.
