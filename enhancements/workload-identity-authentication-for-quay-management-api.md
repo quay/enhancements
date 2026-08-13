@@ -48,8 +48,9 @@ Workload → Quay Management API: presents a ServiceAccount bearer token and req
 
 Quay → Kubernetes API: validates the token through TokenReview (provisional recommendation).
 
-Quay: resolves the validated identity, applies the selected Quay authorization mapping, and reuses
-the existing organization token endpoint/lifecycle.
+Quay: resolves the validated identity, applies the selected authorization gate
+(administrator-provided
+mapping or Kubernetes SAR), and reuses the existing organization token endpoint/lifecycle.
 
 Quay → Workload: returns a scoped OAuth bearer token, or rejects the request without issuing one.
 
@@ -60,13 +61,24 @@ src="https://github.com/user-attachments/assets/487ae9b7-0aef-4e50-99a2-a65558bb
 
 ## 4. Validation approach
 
-*Working recommendation:* Kubernetes API validation using TokenReview, followed by Quay-side
-authorization. This keeps Kubernetes as the authority for ServiceAccount token validity and
-rotation.
+**Primary direction:** Kubernetes API validation using TokenReview. Quay supplies its expected
+audience
+when requesting validation, so a valid token issued for another service is not accepted for Quay.
+The
+validation path fails closed when the Kubernetes API cannot establish a valid, Quay-intended
+identity.
+
+TokenReview establishes that the token is valid, identifies the ServiceAccount, and confirms that
+the
+token is intended for Quay. It does not by itself authorize Quay access; that is the separate
+mapping
+or SAR decision described in Section 5.
 
 *Alternative for review:* locally validate the JWT using issuer, signature, audience, and claims.
-This may reduce API dependency but makes issuer/key-discovery, revocation semantics, and trust
-configuration Quay concerns.
+This
+may reduce API dependency but makes issuer/key-discovery, revocation semantics, and trust
+configuration
+Quay concerns. OIDC/JWKS is not the primary direction for this Kubernetes-specific exchange.
 
 ## 5. Authorization mapping — open decision
 
@@ -83,6 +95,10 @@ How should a validated identity map to a Quay subject and allowed Management API
 ### 5.1 Authorization decision: SAR or explicit mapping
 
 The design must choose how a validated Kubernetes ServiceAccount becomes authorized for Quay access.
+A valid ServiceAccount token alone must not grant access. The authorization gate remains open
+between
+two candidates: an administrator-provided Quay mapping, which is the preferred working direction, or
+Kubernetes SubjectAccessReview (SAR).
 
 #### Option A — Kubernetes SubjectAccessReview (SAR)
 
@@ -100,7 +116,8 @@ defines Kubernetes RBAC as the source of truth for Quay access.
 
 Quay validates the ServiceAccount with TokenReview, then looks up an administrator-created mapping
 from cluster identity, namespace, and ServiceAccount to a Quay subject and an allow-list of Quay
-scopes.
+scopes. Missing or empty authorization configuration denies the exchange; a valid identity is never
+authorized implicitly.
 
 **The mapping must explicitly define:**
 
@@ -129,9 +146,13 @@ Quay-scope enforcement.
 
 #### Decision guidance
 
-Use SAR only if Kubernetes RBAC is intentionally the policy authority. Otherwise, use an **explicit
-mapping**, preferably a Quay Operator-managed CRD for Kubernetes deployments plus an equivalent
-Quay-native configuration mechanism for standalone deployments.
+The authorization mechanism remains an open design decision. The preferred working direction is an
+**explicit mapping**, preferably a Quay Operator-managed CRD for Kubernetes deployments plus an
+equivalent Quay-native configuration mechanism for standalone deployments. SAR remains a valid
+alternative if Kubernetes RBAC is intentionally chosen as the policy authority. Either mechanism
+must
+provide explicit authorization, deny by default, scope enforcement, revocation behavior, and
+auditability.
 
 ## 6. Token issuance
 
@@ -140,9 +161,10 @@ lifecycle. Workload identity changes how the caller is authenticated; it does no
 token format or lifecycle.
 
 The workload presents its ServiceAccount JWT together with the target organization and requested
-Quay scopes. Quay validates the workload identity, checks that the requested scopes are a subset of
-the scopes authorized for that identity, and returns a standard Quay OAuth bearer token with an
-expiration. The token then follows the existing Quay OAuth lifecycle, including scope enforcement,
+Quay scopes. Quay validates the workload identity, applies the selected authorization gate, checks
+that the requested scopes are a subset of the scopes authorized for that identity, and returns a
+standard Quay OAuth bearer token with an expiration. The token then follows the existing Quay OAuth
+lifecycle, including scope enforcement,
 expiration, revocation, and audit behavior.
 
 The original prototype was rejected because it mapped a ServiceAccount JWT directly to a Quay robot
