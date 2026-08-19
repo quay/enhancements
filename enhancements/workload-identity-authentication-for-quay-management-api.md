@@ -299,3 +299,14 @@ The core shipping bar is:
 > A real Kubernetes workload can obtain a scoped Quay OAuth token, use it successfully within its
 authorization boundary, and is reliably denied outside that boundary—without regressing existing
 authentication flows.
+
+## Assumptions to validate
+Pending validation with customer:
+- Single cluster?  → Do their K8s workloads run on the same cluster as Quay, or do they have cross-cluster scenarios?
+(Assuming cross cluster for now)
+- Which operations?  → Beyond org/repo/robot/federation provisioning, do they need superuser-level operations?
+- How many SAs?  → Small set (operator + CI) or large dynamic set? Exact match should be fine for the former.
+- Coarse scopes OK?  → org:admin grants everything in the org. Fine-grained scoping (RFE-9574) is a separate initiative. Is this acceptable for now?
+- Token TTL?  → Is 24h the right cap? What are their automation patterns (hourly reconciliation vs. daily batch)?
+- Non-K8s automation? → If they also run Terraform/Ansible outside K8s, those need Phase 1 bootstrap or PROJQUAY-10538 M2M (Quay 3.18), not this feature.
+
