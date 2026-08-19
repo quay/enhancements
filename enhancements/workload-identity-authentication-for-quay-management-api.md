@@ -175,8 +175,7 @@ How should a validated identity map to a Quay subject and allowed Management API
 - Explicit configured mapping: cluster/namespace/ServiceAccount → Quay identity + scopes. Strong
   auditability; more configuration.
 - Kubernetes RBAC-driven mapping: aligns with Kubernetes permissions; scope translation is complex and
-  may couple systems.
-  questions.
+  may couple systems. 
 
 #### Explicit administrator-controlled mapping (preferred working direction)
 
@@ -290,6 +289,7 @@ without allowing the workload to grant itself additional Quay access.
   - Token expiration, revocation, and audit behavior work as expected.
   - Existing programmatic bootstrap, human authentication, and non-Kubernetes flows remain unaffected.
   - Missing token owner in DB throws clear error.
+  - ServiceAccounts from multiple clusters can exchange their tokens with Quay (not limited to single-cluster usecase).
 - **Release confidence:** Test coverage includes upgrade/rollback or version-skew scenarios relevant
   to the supported deployment model, and the workload-consumer and administrator documentation is
   sufficient to configure and troubleshoot the feature.
