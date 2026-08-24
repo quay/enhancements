@@ -21,6 +21,17 @@ see-also:
 Build a new endpoint (POST `/api/v1/bootstrap/exchange`) that accepts a Kubernetes ServiceAccount JWT and returns a scoped Quay OAuth token.  Reuse  [PROJQUAY-9856](https://redhat.atlassian.net/browse/PROJQUAY-9856)token-minting model functions.  
 No SAR, no CRDs, no K8s RBAC mapping, no wildcards.
 
+### Background
+Federated robot accounts brought keyless authentication to registry push/pull, 
+but the Management API still requires automation to "masquerade" as a human user. 
+If that human leaves or is deactivated in LDAP/AD, the automation breaks. The common 
+workaround, a "dummy" human user in the identity provider, consumes a seat license, 
+requires bypassing MFA, and violates non-human identity management policies. 
+Robot accounts cannot help here because they are restricted to registry operations and cannot 
+manage the platform itself. This proposal extends the keyless workload identity pattern to 
+the Management API, enabling Kubernetes workloads to authenticate via ServiceAccount identity 
+without stored credentials.
+
 ## 2. Goals and non-goals
 
 #### Goals
