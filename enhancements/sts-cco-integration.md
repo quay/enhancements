@@ -334,8 +334,11 @@ OpenShift's CCO, not Quay) in the registry namespace.
 - **Downgrade**: If the operator is downgraded to a version without STS
   support, the CredentialsRequest remains orphaned (ownerReference still
   points to QuayRegistry). The admin should manually clean up the
-  CredentialsRequest. The quay-app pods will revert to whatever credential
-  method is configured in the storage config.
+  CredentialsRequest. On downgrade, the admin must re-add static AWS
+  credentials (s3_access_key/s3_secret_key) to the configBundleSecret, since
+  the previous operator version does not support STS authentication. The STS
+  upgrade flow requires removing static keys, so they will not be present in
+  the config bundle after an upgrade to STS.
 
 ### Version Skew Strategy
 
