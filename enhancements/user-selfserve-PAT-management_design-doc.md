@@ -1,8 +1,6 @@
 # PROJQUAY-6385 — User Self-Service API Token Management
-## Enhancement Design Document — Phase 3
 
 **Jira:** [PROJQUAY-6385](https://redhat.atlassian.net/browse/PROJQUAY-6385)  
-**Dependencies:** [PROJQUAY-12058](https://redhat.atlassian.net/browse/PROJQUAY-12058) (Phase 1 GA), [PROJQUAY-10436](https://redhat.atlassian.net/browse/PROJQUAY-10436) (Phase 1), [PROJQUAY-9755](https://redhat.atlassian.net/browse/PROJQUAY-9755) (Phase 2)
 
 ---
 
@@ -13,9 +11,6 @@
 3. [Solution Proposal](#3-solution-proposal)
 4. [Key Design Decisions](#4-key-design-decisions)
 5. [User Journeys](#5-user-journeys)
-6. [Limitations and Clarifications Required](#6-limitations-and-clarifications-required)
-7. [Risk of making application_id nullable and mitigation plan](#7-risk-of-making-application_id-nullable-and-mitigation-plan)
-8. [Appendix A: Reference Material](#appendix-a-reference-material)
 
 ---
 
@@ -39,7 +34,6 @@ Today's OAuth scopes are **namespace-wide**. When a user selects a scope during 
 
 There is **no mechanism** to say: "This token can only read `myorg/myrepo` and nothing else."
 
-**Code evidence:** In `auth/scopes.py`, scopes are defined as simple named constants (`READ_REPO`, `WRITE_REPO`, etc.) with no resource-binding capability. In `auth/permissions.py`, the `SCOPE_MAX_REPO_ROLES` mapping applies a blanket role cap across all repositories — the same cap applies to every repo the user has access to, with no per-repo filtering.
 
 #### Problem 2: Only Organization Admins Can Manage Tokens
 
@@ -51,13 +45,9 @@ Token creation today requires navigating to **Organization Settings → Applicat
 
 This does not scale for large organizations with hundreds of developers.
 
-**Code evidence:** In `endpoints/api/organization_application_tokens.py`, all three endpoints (`GET`, `POST`, `DELETE`) require `ORG_ADMIN` scope, enforced via the `@require_scope(scopes.ORG_ADMIN)` decorator.
-
 #### Problem 3: Token Creation Requires OAuth Application Expertise
 
 Before a user can get a token, someone must first create an "OAuth Application" with a `client_id`, `client_secret`, `redirect_uri`, and `application_uri`. This is the standard OAuth 2.0 setup — appropriate for third-party integrations, but **hostile UX** for a developer who just wants an API key for their personal scripts.
-
-**Code evidence:** In `data/database.py`, `OAuthAccessToken` has a **non-nullable** foreign key to `OAuthApplication`. There is no code path to create a token without an associated application.
 
 ### 1.3 The Architecture Root Cause
 
@@ -75,91 +65,34 @@ This chain enforces three constraints that this Phase 3 feature implementation m
 2. Every OAuth Application MUST be tied to an Organization
 3. Scopes are stored as flat strings (`"repo:read repo:write"`) with no resource binding
 
-### 1.4 Security Impact
-
-Tony's RICE score comment in the feature ticket describes the supply-chain risk:
-
-> "Current quay.io personal tokens carry full org-admin permissions across ALL organizations a user belongs to, including the `openshift` org containing OCP release images."
-
-The statement is not accurate. Not all tokens have org admin permissions. There is option to scope the tokens. But the scopes are also blanket across the namespaces. Also most tokens created a given org admin permissions due to CI/CD conviniece. A better more accurate way to state the current situations would be:
-> "Quay's current scope model is namespace-wide: every scope applies blanket across all organizations and repositories a user has access to. There is no per-resource scoping. Combined with the practical tendency for users to select broad scopes like org:admin for CI/CD convenience, this creates a significant supply-chain risk — a single compromised token can grant an attacker full access across every organization the user belongs to."
-
-**Note on terminology:** In the feature ticket the term "personal tokens" is used loosely to refer to existing OAuth Application tokens that individual users have authorized. True Personal Access Tokens (PATs) do not exist today — building them is the purpose of this feature.
-
-A single compromised engineer laptop → full admin access across all orgs → potential deletion of critical OCP release images. Phase 3 directly addresses this by enabling tokens with minimal required permissions scoped to specific repositories.
-
-### 1.5 What Phase 1 & Phase 2 Built (Foundation for Phase 3)
-
-#### Phase 1 — Programmatic OAuth Token Provisioning (PROJQUAY-10436) - Already Implemented
-
-**What it solved:** The chicken-and-egg problem — you need a token to create a token.
-
-**What was built:**
-- REST API endpoints to create/list/delete tokens programmatically
-- Bootstrap token feature: auto-generates a token on first Quay startup
-- Feature flag: `FEATURE_PROGRAMMATIC_BOOTSTRAP` (default: `false`)
-- Shipped as Tech Preview in Quay 3.18
-- Implementation PRs: [#6134](https://github.com/quay/quay/pull/6134) (design), [#6224](https://github.com/quay/quay/pull/6224) (code)
-
-**Phase 3 relevance:** Phase 1 established the backend pattern for API-driven token creation. Phase 3 extends this pattern to user-level self-service.
-
-**Deployment status:** The bootstrap feature is DISABLED on quay.io by two mechanisms: (1) `FEATURE_PROGRAMMATIC_BOOTSTRAP` defaults to `false`, (2) the `verify_not_prod` decorator blocks superuser methods when hostname contains "quay.io".
-
-#### Phase 2 — OAuth Token Visibility & Management UI (PROJQUAY-9755) - Already Implemented
-
-**What it solved:** Org admins had no visibility into tokens or ability to revoke individual tokens.
-
-**What was built:**
-- "API Access Tokens" tab in Organization Settings > Applications
-- Token list: Name, Created By, Scopes, Expires, Last Used
-- Granular revocation (per-token, not per-app)
-- `display_name` column added to `OAuthAccessToken` via Alembic migration
-- Implementation PRs: [#6461](https://github.com/quay/quay/pull/6461) (API), [#6488](https://github.com/quay/quay/pull/6488) (UI)
-
-**Phase 2 API endpoints:**
-```
-GET    /api/v1/organization/{orgname}/applications/{client_id}/tokens
-POST   /api/v1/organization/{orgname}/applications/{client_id}/tokens
-DELETE /api/v1/organization/{orgname}/applications/{client_id}/tokens/{token_uuid}
-```
-
-**Key function `_can_mint_scope()`:** Validates that a user cannot create a token with more permissions than they actually hold. This pattern MUST be extended for Phase 3 to support per-repo validation.
-
-**Phase 3 relevance:** Phase 3 reuses the token lifecycle API pattern and several UI components (token list table, revoke modal, token display modal).
-
-**Deployment status:** Phase 2 API endpoints are NOT behind any feature flag — they are unconditionally imported in `endpoints/api/__init__.py`. They use `ORG_ADMIN` scope (not superuser), so they are likely available on quay.io.
-
 ---
 
 ## 2. Acceptance Criteria
 
-> *Source: [PROJQUAY-6385](https://redhat.atlassian.net/browse/PROJQUAY-6385). Items marked [DESIGN NOTE] are engineering annotations.*
 
-### 2.1 Token Creation
+#### 2.1 Token Creation
 
 - Users can manage API tokens in their user account:
   - **Path 1 (OAuth Application flow):** They can create tokens in the context of an OAuth application following the existing "Application" concept from organizations (including application name, callback URL, etc.)
   - **Path 2 (Simplified flow):** They can create tokens alternatively using a simpler flow that only captures mandatory information: human-readable token name and optionally an expiry date
   - They can see a list of all tokens (both active and expired) as opposed to just a list of applications
 
-> [DESIGN NOTE] Both paths produce user-level tokens with fine-grained scoping (confirmed with PM). The `token_kind = 'pat'` discriminator applies to ALL Phase 3 tokens regardless of creation path. The distinction is only in how the token is created (with or without an OAuth Application), not in what scope enforcement model it uses.
 
-### 2.2 Organization Scoping
+#### 2.2 Organization Scoping
 
 - Users can optionally limit API tokens to a single organization or a subset of organizations
   - The **default org scope** when creating a new token is **a single organization** selected by the user
   - Tokens spanning multiple organizations or all organizations require an explicit opt-in
   - When a user selects more than one org, or selects "All organizations I belong to," the UI displays a security notice:
-    > *"This token will have access to resources across multiple organizations. For better security, consider creating a separate token per organization for each automation task."*
 
-### 2.3 Repository Scoping
+#### 2.3 Repository Scoping
 
 - Users can optionally limit API tokens to **specific repositories** within the selected organization(s)
   - The **default** is "all accessible repositories in the selected org(s)" → no change to existing behavior
   - Users can select individual repositories to **narrow** the token's scope
   - Repository-scoped tokens only grant access to the listed repos, even if the user has broader access within that org
 
-### 2.4 Permission Scoping
+#### 2.4 Permission Scoping
 
 - Users can optionally scope API tokens to a subset of permissions:
   - Organization management (CRUD access to robots, teams, membership and all org-level properties including org lifecycle) on existing orgs
@@ -171,15 +104,13 @@ DELETE /api/v1/organization/{orgname}/applications/{client_id}/tokens/{token_uui
   - User account administration
   - User account read-access
 
-### 2.5 Escalation Prevention
+#### 2.5 Escalation Prevention
 
 - User-managed API tokens are always naturally limited by the permissions of the users owning the token:
   - The UI will **not allow** selecting more permissions than the user currently has
   - When user permissions are reduced over time, this affects the permission scope of the tokens owned by this user as well
 
-> [DESIGN NOTE] Escalation prevention is enforced at the API level, not only the UI level. The `_can_mint_scope()` pattern from Phase 2 is extended for per-resource validation. See Section 4, Decision 8 for the full escalation prevention matrix.
-
-### 2.6 Token Management UI
+#### 2.6 Token Management UI
 
 - Users will get a section in the UI to manage their API tokens, including:
   - Getting a list of existing tokens, with their name, scope, expiry date, and when last used
@@ -189,24 +120,24 @@ DELETE /api/v1/organization/{orgname}/applications/{client_id}/tokens/{token_uui
   - The ability to change the expiry date of tokens (including expiring it right away)
 - This user UI is supplemented by a new API
 
-### 2.7 Phase 2 Relationship
+#### 2.7 Phase 2 Relationship
 
 - Phase 3 builds on Phase 2 UI components:
   - The token list table reuses the Phase 2 component (Name, Created By, Scopes, Expires, Last Used, Actions columns)
   - The "Create Token" wizard reuses the Phase 2 wizard, extended with the org-scope selector
   - **No changes** are made to Phase 2's "Org Settings → OAuth Applications → API Access Tokens tab"
 
-### 2.8 Audit & Separation
+#### 2.8 Audit & Separation
 
 - Tokens created in User Settings are labeled **"User Token"** in **audit logs** to distinguish them from org-admin tokens created via OAuth Applications (Phase 2)
 - The "User Settings → API Tokens" page is a **new, standalone section**, clearly separated from Org Settings; there is no UI overlap or duplication with Phase 2
 
-### 2.9 Defaults & Enforcement
+#### 2.9 Defaults & Enforcement
 
 - The simplified token creation flow (name + expiry only, no OAuth application setup required) defaults the org scope to a **single organization**
 - Token permissions can **never exceed** the creating user's permissions in the selected organization(s), enforced at the API level, not only at the UI level
 
-### 2.10 Resolved Open Questions
+#### 2.10 Resolved Open Questions
 
 | Question | Resolution |
 |---|---|
@@ -387,12 +318,6 @@ erDiagram
     }
 ```
 
-**Key relationships:**
-- `OAuthAccessToken.application_id` is now **nullable** — `NULL` for Path 2 PATs, set for Path 1 (user OAuth app) tokens and existing org-level tokens
-- `OAuthAccessToken.token_kind` = `'pat'` for ALL Phase 3 tokens (both paths), `'oauth_app'` for existing org-level tokens
-- `PersonalAccessTokenScope` stores fine-grained resource bindings for ALL tokens where `token_kind = 'pat'`
-- `OAuthApplication.owner_user_id` is **new** — set for user-owned apps (Path 1), NULL for org-owned apps (existing)
-
 **Scope enforcement rule:**
 ```
 token_kind = 'oauth_app' → Blanket scope enforcement (existing, unchanged)
@@ -448,7 +373,7 @@ POST   /api/v1/user/tokens/{token_uuid}/refresh
 
 #### 3.3.2 User OAuth Application Endpoints (Path 1)
 
-If Path 1 (user-level OAuth apps) is in scope:
+For Path 1 (user-level OAuth apps):
 
 ```
 GET    /api/v1/user/applications
@@ -471,33 +396,16 @@ Existing OAuth tokens:  <no prefix> (plain 40-char random strings — confirmed 
 Phase 3 PATs:           quay_pat_<40_char_random>
 ```
 
-> **Note:** Quay tokens today have NO prefix at all. They are plain 40-character random strings generated via `random_string_generator()` in `data/model/oauth.py`. The `quay_pat_` prefix is a **new proposal** for Phase 3 tokens. Consider also adding `quay_oat_` for new org-level OAuth tokens in a follow-up (not for existing tokens — that would break integrations).
-
 This enables:
 - **GitHub Secret Scanning:** GitHub runs automated scanners on every public commit looking for patterns that match known token prefixes (e.g., `ghp_` for GitHub PATs, `glpat-` for GitLab PATs). Quay could register `quay_pat_` with the [GitHub Secret Scanning Partner Program](https://docs.github.com/en/code-security/secret-scanning/secret-scanning-partner-program), enabling automatic detection and notification when Quay PATs are leaked in public repositories.
 - Quick visual identification in logs and debug output
 - Programmatic distinction between token types without a database lookup
 
-### 3.5 Feature Flag
-
-```python
-# config.py
-FEATURE_USER_PAT = False  # default off for incremental rollout
-```
-
-All Phase 3 endpoints and UI components should be gated behind this flag using the `@show_if` decorator:
-
-```python
-@show_if(features.USER_PAT)
-class UserPersonalAccessTokens(ApiResource):
-    ...
-```
-
-### 3.6 Scope Enforcement (Runtime)
+### 3.5 Scope Enforcement (Runtime)
 
 This is the most critical and complex part of the implementation.
 
-#### 3.6.1 Current Enforcement Flow
+#### 3.5.1 Current Enforcement Flow
 
 ```
 API Request with Bearer token
@@ -519,7 +427,7 @@ def _repo_role_for_scopes(self, role):
     return min(role, max_role)  # cap at whatever the scope allows
 ```
 
-#### 3.6.2 Phase 3 Enforcement Changes
+#### 3.5.2 Phase 3 Enforcement Changes
 
 For PATs (`token_kind = 'pat'`), add a **resource binding check** before the blanket scope cap:
 
@@ -550,7 +458,7 @@ def _repo_role_for_scopes(self, namespace, repo_name, role):
 - Cache scope bindings in a dictionary keyed by `(namespace, resource_name)` for O(1) lookup
 - For tokens with many scopes (100+), consider a Redis cache
 
-#### 3.6.3 Docker Auth Flow Enforcement
+#### 3.5.3 Docker Auth Flow Enforcement
 
 Docker registry v2 authentication goes through a separate endpoint that issues short-lived JWT bearer tokens. This flow:
 
@@ -563,60 +471,14 @@ docker pull myorg/myrepo:latest
 
 The `/v2/auth` endpoint validates the OAuth token and checks if it has the required scope for the requested repository. **Phase 3 will add per-resource filtering here too** — when the OAuth token is a PAT, verify that `(myorg, myrepo)` is in the token's `PersonalAccessTokenScope` bindings before issuing the JWT bearer token.
 
-### 3.7 Alembic Migration
+### 3.6 Alembic Migration
 
-```python
-"""add_personal_access_token_support
+We will have to do an alembic migration which would:
+1. Make application nullable on oauthaccesstoken
+2. Add token_kind discriminator
+3. Create PersonalAccessTokenScope table
+4. Add owner_user_id to oauthapplication (for Path 1)
 
-Revision ID: <auto_generated>
-Revises: b30800b1d271
-"""
-
-import sqlalchemy as sa
-
-def upgrade(op, tables, tester):
-    # 1. Make application nullable on oauthaccesstoken
-    with op.batch_alter_table("oauthaccesstoken") as batch_op:
-        batch_op.alter_column("application_id", nullable=True)
-    
-    # 2. Add token_kind discriminator
-    op.add_column(
-        "oauthaccesstoken",
-        sa.Column("token_kind", sa.String(length=20), nullable=False, server_default="oauth_app")
-    )
-    
-    # 3. Create PersonalAccessTokenScope table
-    op.create_table(
-        "personalaccesstokenscope",
-        sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
-        sa.Column("token_id", sa.Integer, sa.ForeignKey("oauthaccesstoken.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("scope", sa.String(length=80), nullable=False),
-        sa.Column("resource_type", sa.String(length=20), nullable=False),
-        sa.Column("namespace", sa.String(length=255), nullable=False),
-        sa.Column("resource_name", sa.String(length=255), nullable=True),
-    )
-    op.create_index(
-        "idx_pat_scope_lookup",
-        "personalaccesstokenscope",
-        ["token_id", "resource_type", "namespace", "resource_name"]
-    )
-    
-    # 4. Add owner_user_id to oauthapplication (for Path 1)
-    op.add_column(
-        "oauthapplication",
-        sa.Column("owner_user_id", sa.Integer, sa.ForeignKey("user.id"), nullable=True)
-    )
-    
-    # Populate test data
-    tester.populate_column("oauthaccesstoken", "token_kind", tester.TestDataType.String)
-
-def downgrade(op, tables, tester):
-    op.drop_column("oauthapplication", "owner_user_id")
-    op.drop_table("personalaccesstokenscope")
-    op.drop_column("oauthaccesstoken", "token_kind")
-    with op.batch_alter_table("oauthaccesstoken") as batch_op:
-        batch_op.alter_column("application_id", nullable=False)
-```
 
 ---
 
@@ -947,259 +809,5 @@ POST /api/v1/user/tokens/{token_uuid}/refresh
 Response: {uuid: same, token: "<opaque-token-placeholder-starting-with-quay_pat_>", expires_at: <extended>}
 
 ```
-
----
-
-## 6. Limitations and Clarifications Required
-
-### 6.1 Clarifications Needed from Product Owner
-
-#### Scope Model (Critical — Blocks Design)
-
-| # | Question | Why It Matters | Recommendation |
-|---|---|---|---|
-| 1 | **Wildcard org scoping?** Should users be able to say "all current AND future repos in this org"? | Determines if `resource_type='organization'` means "all repos now" or "all repos now and forever" | Recommend: org-level scope covers current AND future repos (otherwise it's unusable for dynamic orgs) |
-| 2 | **Cross-org tokens?** Can one PAT cover repos in multiple organizations? | The ticket says "multi-org support" but the security implications are significant | Recommend: Allow but with prominent warning in UI |
-| 3 | **Scope granularity beyond read/write/admin?** Should there be `create`, `delete`, `manage-tags`, `manage-mirrors`? | Affects the `PersonalAccessTokenScope.scope` enum and enforcement complexity | Recommend: Start with existing scopes (repo:read, repo:write, repo:admin, org:admin, user:read, user:admin). Add finer granularity in a follow-up |
-
-#### Permissions & Security
-
-| # | Question | Why It Matters | Recommendation |
-|---|---|---|---|
-| 4 | **Robot accounts?** Can robot accounts create PATs? | Robots are used heavily for automation; PATs could replace robot tokens | Recommend: Phase 1 = human users only. Evaluate robot PATs as follow-up |
-| 5 | **Org admin visibility?** Should org admins see/revoke PATs that access their org? | Tension between user autonomy and org governance | Recommend: Org admins can VIEW (not revoke) PATs accessing their org. Org owner can revoke (with notification to user) |
-| 6 | **Notification on revocation?** Should users be notified when their PAT is revoked by an org admin? | Impacts audit trail and user experience | Recommend: Yes, email + in-app notification |
-
-#### Lifecycle
-
-| # | Question | Why It Matters | Recommendation |
-|---|---|---|---|
-| 7 | **Max tokens per user?** Is there a limit? | Prevents abuse and simplifies billing/resource planning | Recommend: Configurable limit, default 100 |
-| 8 | **Token refresh semantics?** Does refresh extend expiry or just rotate the secret? | The ticket mentions "token refresh" but doesn't specify behavior | Recommend: Refresh rotates the secret AND resets expiry to the original duration |
-| 9 | **Expiration notification?** Should users be warned before token expiry? | Improves UX for CI/CD tokens that would silently break | Recommend: Email notification 7 days before expiry |
-
-#### UX & Deployment
-
-| # | Question | Why It Matters | Recommendation |
-|---|---|---|---|
-| 10 | **UI location?** User Settings page? New top-level nav? Both? | Impacts frontend routing and navigation | Recommend: User Settings → "Personal Access Tokens" tab |
-| 11 | **Path 1 phasing?** Can we ship Path 2 (PATs) first and add Path 1 (user OAuth apps) as follow-up? | Path 1 significantly increases scope; Path 2 delivers 90% of the security value | Recommend: Phase Path 1 as separate work item |
-| 12 | **Docker error messages?** What should users see when a scoped PAT denies access to a repo? | Affects user experience and debugging | Recommend: Clear error stating the specific repo is not in the token's scope |
-
-### 6.2 Known Limitations
-
-#### Limitation 1: Existing Token Migration
-
-There is **no automated migration path** from existing OAuth Application tokens to PATs. Users with existing tokens must:
-1. Create new PATs with the desired scopes
-2. Update their scripts/CI to use the new PATs
-3. Revoke old OAuth tokens manually
-
-**Rationale:** Automatic migration is unsafe — the system cannot infer what fine-grained scopes a blanket-scoped token _should_ have.
-
-#### Limitation 2: Scope Cannot Be Modified After Creation
-
-Once a PAT is created, its scopes are immutable. To change scopes, the user must create a new token and revoke the old one.
-
-**Rationale:** Immutability prevents privilege escalation on potentially compromised tokens and simplifies the audit trail.
-
-#### Limitation 3: No Cross-Registry Scoping
-
-PATs only apply to the Quay instance they were created on. A PAT created on `quay.io` cannot be used on a self-hosted Quay instance or vice versa.
-
-#### Limitation 4: Backward Compatibility with `docker login`
-
-`docker login` uses a single token for all subsequent `docker pull`/`push` operations to a registry hostname. If a user has a PAT scoped to `orgA/repo1` but tries to `docker pull orgA/repo2`, they will get an auth error — there is no "partial login" concept in Docker.
-
-**Mitigation:** Clear error messages and documentation explaining this behavior.
-
-#### Limitation 5: Scope Enforcement Performance
-
-For tokens with many resource bindings (100+), the eager-load-and-hash approach may add latency to the first API call per session. If this becomes an issue, consider:
-- Caching PAT scope lookups in Redis with TTL
-- Setting a per-token scope binding limit (e.g., 200 repos)
-
-
-### 6.6 Scope Enforcement Performance Detail
-
-#### Strategy 1: Eager Load + In-Memory Dictionary (Recommended for v1)
-
-When a PAT is first validated in a request, load all its scope bindings into a Python dictionary for the duration of the request:
-
-```python
-# On first access in the request:
-scope_bindings = {}
-for row in PersonalAccessTokenScope.select().where(
-    PersonalAccessTokenScope.token_id == token.id
-):
-    key = (row.namespace, row.resource_name)  # ('myorg', 'myrepo') or ('myorg', None)
-    scope_bindings[key] = row.scope
-
-# On each permission check during the request:
-def has_scope_for_resource(namespace, repo_name):
-    # Check specific repo binding first (more-specific wins)
-    if (namespace, repo_name) in scope_bindings:
-        return scope_bindings[(namespace, repo_name)]
-    # Fall back to org-level binding
-    if (namespace, None) in scope_bindings:
-        return scope_bindings[(namespace, None)]
-    return None  # No access
-```
-
-**Why this works:** Most PATs will have 1–20 scope bindings. Loading 20 rows into a dictionary on the first request is negligible (~0.1ms). All subsequent permission checks in the same request are O(1) dictionary lookups.
-
-#### Strategy 2: Redis Cache (Follow-up for High-Traffic Tokens)
-
-For CI pipelines making hundreds of requests/second with the same PAT:
-
-```python
-cache_key = f"pat_scopes:{token.id}"
-cached = redis.get(cache_key)
-if cached:
-    scope_bindings = deserialize(cached)
-else:
-    scope_bindings = load_from_db(token.id)
-    redis.setex(cache_key, 300, serialize(scope_bindings))  # 5-min TTL
-```
-
-**Cache invalidation:** When a PAT is revoked, delete its Redis key. Since PAT scopes are immutable after creation (Decision 3), there is no risk of stale scope data — only revocation needs to invalidate the cache.
-
-| Strategy | DB queries per request | Lookup time | Infrastructure |
-|---|---|---|---|
-| Naive (query per check) | 10+ per request | ~1ms each | None |
-| **Strategy 1 (eager load)** | **1 per request** | **O(1) after load** | **None** |
-| Strategy 2 (Redis) | 0 (cache hit) | O(1) | Redis required |
-
-**Recommendation:** Start with Strategy 1. Add Redis only if production monitoring shows latency issues with high-traffic tokens.
-
-### 6.3 Inadequacies in the Current Ticket Description
-
-| # | Issue | Detail |
-|---|---|---|
-| 1 | **"Simplified flow: name + expiry only"** is incomplete | The simplified flow MUST include scope/resource selection. Without it, the token is just another blanket token — defeating the purpose |
-| 2 | **Scope model is unspecified** | How per-repo permissions are encoded and enforced is the single biggest design decision and it's not in the ticket |
-| 3 | **"Reuses Phase 2 UI components"** is overestimated | Phase 2 UI is org-admin-centric. Phase 3 needs new page structure, new data flows, and new components for repo/org selection |
-| 4 | **No mention of authorization enforcement** | The ticket describes creation UX but not runtime enforcement — every API call and Docker operation must check resource bindings |
-| 5 | **Dependency chain is incomplete** | Phase 2 is not listed as a dependency, but Phase 3 reuses Phase 2 API patterns and UI components |
-| 6 | **PM terminology is imprecise** | "Personal tokens" in comments refers to existing OAuth tokens, not true PATs. This should be clarified to avoid confusion |
-
-### 6.4 Edge Cases to Consider
-
-| Edge Case | Expected Behavior |
-|---|---|
-| User loses access to a repo after PAT creation | Token's scope binding still exists, but enforcement denies access because the underlying user permission check fails. The `_populate_repository_provides()` method won't load a need for a repo the user can't access. |
-| Org is deleted while PAT has scopes targeting it | PAT scope bindings become orphaned. Enforcement naturally denies access because the namespace doesn't resolve. Consider cleanup job. |
-| Repo is renamed | PAT scope bindings reference the old name. Access will fail. The user must create a new PAT. Consider supporting repo rename event hooks. |
-| User creates PAT with 0 scopes | Reject at API level. A PAT with no scopes is useless and confusing. |
-| User creates PAT for a repo they own but then transfer ownership | Same as "user loses access" — enforcement checks underlying permissions. |
-| Token expiration at exactly midnight UTC | Use `expires_at > utcnow()` for comparison, not `>=`. Consistent with existing token expiration logic. |
-| Concurrent refresh requests | Use optimistic locking (check-and-set) or database-level row locking to prevent race conditions during token rotation. |
-
-### 6.5 Files Requiring Changes
-
-| File | Change Type | Description |
-|---|---|---|
-| `data/database.py` | Modify | Make `OAuthAccessToken.application` nullable, add `token_kind`, add `PersonalAccessTokenScope` model, add `OAuthApplication.owner_user_id` |
-| `data/model/oauth.py` | Modify + Add | Add PAT-specific CRUD functions, extend validation functions |
-| `data/migrations/versions/` | Add | New Alembic migration for schema changes |
-| `auth/scopes.py` | Modify | Add PAT-aware scope validation functions |
-| `auth/permissions.py` | Modify | Add per-resource scope filtering in `_repo_role_for_scopes()` and `_populate_repository_provides()` |
-| `auth/auth_context.py` | Modify | Handle PAT token type in `get_validated_oauth_token()` |
-| `endpoints/api/user_tokens.py` | Add (new file) | All PAT API endpoints |
-| `endpoints/api/__init__.py` | Modify | Import and register new endpoints (with feature flag gating) |
-| `config.py` | Modify | Add `FEATURE_USER_PAT`, `PAT_MAX_EXPIRATION_SECONDS`, `PAT_DEFAULT_EXPIRATION_SECONDS` |
-| `web/src/resources/UserTokenResource.ts` | Add (new file) | API client for PAT endpoints |
-| `web/src/resources/UserTokenTypes.ts` | Add (new file) | TypeScript type definitions |
-| `web/src/hooks/UseUserTokens.ts` | Add (new file) | React hooks for PAT operations |
-| `web/src/routes/UserSettings/PersonalAccessTokens/` | Add (new dir) | PAT list page, create wizard, detail view |
-| `web/src/components/modals/` | Modify | Extend or create modals for PAT generation/revocation |
-| `endpoints/v2/` | Modify | Add PAT scope filtering to Docker v2 auth endpoint |
-
----
-
-## 7. Risk of making application_id nullable and mitigation plan
-
-These location in the codebase would break as they accesses `.application` on a token and assumes it's non-null:
-
-#### File 1: auth/context_entity.py (lines 169-170)
-```
-python
-entity_reference.application.client_id   # ← NullPointerError for PATs
-entity_reference.application.name        # ← NullPointerError for PATs
-```
-**Used in:** Audit logging — writes the application's `client_id` and name into audit events.
-
-#### File 2: auth/oauth.py (lines 146, 151, 153-154, 171, 176)
-```
-python
-validated.application.organization.username  # ← NullPointerError
-validated.application.name                   # ← NullPointerError
-validated.application.client_id              # ← NullPointerError
-```
-**Used in:** OAuth token validation and org namespace resolution.
-
-#### File 3: data/model/oauth.py (~7 locations)
-```
-python
-Line 481: OAuthAccessToken.application == application  # query filter — OK if nullable
-Line 717: found.application_id != canonical_application.id  # comparison — needs guard
-Line 978: OAuthAccessToken.create(application=application)  # creation — already your code
-```
-Query filters with `WHERE application = X` are safe even with nullable FK. The risk is in attribute access (.application.something).
-
-#### File 4: data/database.py — Meta indexes
-```
-python
-Meta.indexes = ((("application", "last_accessed"), False),)
-```
-This composite index works fine with NULL values — PostgreSQL indexes include NULLs by default.
-
-### Mitigation strategy:
-
-```
-python
-# Add a helper property on OAuthAccessToken:
-@property
-def is_pat(self):
-    return self.token_kind == 'pat'
-
-# Then guard every .application access:
-if not token.is_pat:
-    client_id = token.application.client_id
-else:
-    client_id = "pat"  # or token.uuid for audit identification
-```
-
-**Total risk assessment:** ~10 code locations across 3 files need null-guards. The risk is manageable — all are in well-defined auth/audit paths. The alternative (hidden system app) avoids these changes but introduces worse conceptual complexity.
-
----
-
-## Appendix A: Reference Material
-
-### Key PRs to Study
-
-| PR | Phase | Description |
-|---|---|---|
-| [#6134](https://github.com/quay/quay/pull/6134) | Phase 1 | Design document for programmatic token provisioning |
-| [#6224](https://github.com/quay/quay/pull/6224) | Phase 1 | Implementation |
-| [#6461](https://github.com/quay/quay/pull/6461) | Phase 2 | API + data model (token lifecycle endpoints, `display_name` migration) |
-| [#6488](https://github.com/quay/quay/pull/6488) | Phase 2 | UI (token list, generate wizard, revoke action, Playwright e2e tests) |
-
-### Recommended Reading Order
-
-1. `auth/scopes.py` — scope definitions and hierarchy
-2. `data/database.py` — ORM models (`OAuthApplication`, `OAuthAccessToken`)
-3. `data/model/oauth.py` — business logic layer
-4. `auth/permissions.py` — enforcement engine (focus on `_repo_role_for_scopes`, `_populate_repository_provides`)
-5. `endpoints/api/organization_application_tokens.py` — Phase 2 API (your template)
-6. `auth/auth_context.py` — authentication flow
-7. PR #6461 diff — Phase 2 implementation details
-8. PR #6488 diff — Phase 2 UI patterns
-
-### External References
-
-- [GitHub Fine-Grained PATs Documentation](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#fine-grained-personal-access-tokens)
-- [GitLab Personal Access Tokens](https://docs.gitlab.com/ee/user/profile/personal_access_tokens.html)
-- [OAuth 2.0 RFC 6749](https://datatracker.ietf.org/doc/html/rfc6749)
 
 ---
