@@ -1,5 +1,5 @@
 ---
-title: workload-identity-authentication-for-quay-management-api
+title: org-scoped-workload-identity-for-quay-management-api
 authors:
   - "@Marcusk19"
 reviewers:
@@ -7,317 +7,322 @@ reviewers:
 approvers:
   - TBD
 creation-date: 2026-08-04
-last-updated: 2026-08-19
+last-updated: 2026-09-11
 status: provisional
 see-also:
-  - "https://redhat.atlassian.net/browse/PROJQUAY-12483"
   - "https://redhat.atlassian.net/browse/PROJQUAY-11090"
+  - "https://github.com/quay/enhancements/pull/45#issuecomment-5626283676"
 ---
 
-# Workload Identity Authentication for Quay Management API
+# Org-Scoped Workload Identity for Quay Management API
 
 ## 1. Purpose
 
-Build a new endpoint (POST `/api/v1/bootstrap/exchange`) that accepts a Kubernetes ServiceAccount JWT and returns a scoped Quay OAuth token.  Reuse  [PROJQUAY-9856](https://redhat.atlassian.net/browse/PROJQUAY-9856)token-minting model functions.  
-No SAR, no CRDs, no K8s RBAC mapping, no wildcards.
+Enable an organization administrator to configure an OAuth application as a
+non-human, org-scoped workload identity. A workload presents an externally
+issued OIDC JWT to that application's exchange endpoint and receives a
+short-lived Quay OAuth access token that acts as the application.
 
-### Background
-Federated robot accounts brought keyless authentication to registry push/pull, 
-but the Management API still requires automation to "masquerade" as a human user. 
-If that human leaves or is deactivated in LDAP/AD, the automation breaks. The common 
-workaround, a "dummy" human user in the identity provider, consumes a seat license, 
-requires bypassing MFA, and violates non-human identity management policies. 
-Robot accounts cannot help here because they are restricted to registry operations and cannot 
-manage the platform itself. This proposal extends the keyless workload identity pattern to 
-the Management API, enabling Kubernetes workloads to authenticate via ServiceAccount identity 
-without stored credentials.
+This eliminates the need for Management API automation to use a human account,
+a dummy LDAP/AD user, a stored OAuth token, or the shared bootstrap-token
+owner. It also extends keyless federation beyond robot accounts, whose
+registry push/pull authorization does not cover Quay Management API operations.
+
+This proposal is deliberately **not** an instance-wide bootstrap feature. It
+does not use `BOOTSTRAP_TOKEN_OWNER`, a superuser, the reserved bootstrap
+application, or bootstrap token provisioning/renewal. Existing programmatic
+bootstrap remains a separate, compatible feature.
 
 ## 2. Goals and non-goals
 
-#### Goals
+### Goals
 
-- Authenticate eligible Kubernetes ServiceAccounts to Quay.
-- Issue standard Quay OAuth tokens with enforced scopes and normal expiration/revocation behavior.
-- Preserve existing human, non-Kubernetes, and programmatic-bootstrap flows.
-- Provide auditable success and failure outcomes.
+- Let organization administrators configure one OAuth application to trust one
+  or more external workload identities.
+- Support Kubernetes ServiceAccount JWTs first while using a generic OIDC
+  issuer and exact-claims model that can support other OIDC workload issuers.
+- Issue a normal, short-lived Quay OAuth access token whose actor is the
+  configured OAuth application, never a login-capable Quay user.
+- Make the application's configured allowed Quay OAuth scopes the authority
+  boundary; the exchange request may only narrow those scopes.
+- Restrict an application's authority to its owning organization.
+- Reuse standard OAuth token expiry, validation, revocation, audit, and token
+  inventory behavior where applicable.
+- Provide organization-admin APIs and UI to configure bindings and manage the
+  resulting credentials.
 
-#### Non-goals
+### Non-goals
 
-- Replacing human authentication.
-- Removing programmatic bootstrap in this feature.
+- Replacing human authentication or existing OAuth authorization-code flows.
+- Replacing programmatic bootstrap or migrating existing bootstrap users.
+- Using Kubernetes RBAC, `TokenReview`, or `SubjectAccessReview` to derive
+  Quay permissions.
+- Allowing wildcard claim matching in the initial release.
+- Making an OAuth application's client secret a Management API credential.
+- Supporting refresh tokens or OAuth actor/delegation tokens in the initial
+  exchange profile.
 
-## 3. End-to-end architecture
+## 3. Terminology and authorization model
 
-Workload → Quay Management API (new endpoint): presents a ServiceAccount bearer token and requested access.
+An **OAuth application** remains an OAuth client for existing flows. When an
+org admin explicitly enables workload identity on it, it also becomes a
+**WIF application principal**, but only for access tokens issued through a
+configured workload-identity binding.
 
-Quay → Kubernetes API: validates the token through OIDC with the k8s CA.
+A **binding** is an org-admin-owned rule on a WIF application. It contains an
+OIDC issuer, audience requirement, exact claims matcher, allowed Quay OAuth
+scope string, maximum token lifetime, and enabled state. One application can
+have multiple bindings for separate workloads and issuers.
 
-Quay: resolves the validated identity, applies the selected authorization gate
-(administrator-provided mapping), and reuses the existing organization token endpoint/lifecycle.
+The configured scope string is the application's application-local grant. The
+requested scope in an exchange is an additional restriction:
 
-Quay → Workload: returns a scoped OAuth bearer token, or rejects the request without issuing one.
-
-```mermaid
-flowchart LR
-    W[Workload] -->|SA JWT, target, scopes| E[Exchange endpoint]
-    E --> V{Validate JWT}
-    V -->|Invalid| D1[Reject and audit]
-    V -->|Valid identity| M{Configured mapping exists}
-    M -->|No| D2[Reject: no implicit access]
-    M -->|Yes| S{Requested scopes are allowed}
-    S -->|No| D3[Reject and audit]
-    S -->|Yes| O[Issue OAuth token]
-    O --> R[Scoped token with expiration]
-    R --> W
+```text
+effective scope = requested scopes ∩ binding allowed scopes
 ```
 
-*Trust boundary: a valid Kubernetes identity is not, by itself, Quay authorization. Quay must apply
-an explicit authorization decision before minting a token.*
+If `scope` is omitted, the effective scope is the binding's allowed scope set.
+An exchange requesting a scope outside the binding is rejected; Quay never
+silently broadens the request.
 
-## 4. RFC 8693-aligned exchange contract
+The current Quay OAuth scope vocabulary is used unchanged (for example,
+`org:admin`, `repo:create`, `repo:read`, `repo:write`, and `repo:admin`). The
+application-principal authorization implementation interprets these scopes in
+its owning organization only. It cannot act in another organization, even if a
+scope is otherwise broad. Fine-grained, repository-by-repository grants are
+out of scope for this initial profile and can build on future fine-grained RBAC
+work.
 
-The endpoint remains Quay-specific — `POST /api/v1/bootstrap/exchange` — but follows the OAuth 2.0 Token Exchange request and response parameters defined by [RFC 8693](https://datatracker.ietf.org/doc/html/rfc8693).
+## 4. Organization-owned configuration
 
-The Kubernetes ServiceAccount JWT is the RFC 8693 `subject_token`: it represents the workload identity on whose behalf Quay issues a token. This is distinct from Quay's own pod-mounted ServiceAccount token, which is used only for authenticated OIDC discovery/JWKS retrieval.
+Organization administrators configure workload identity through the existing
+OAuth Applications experience and corresponding Management API resources.
+The organization—not a deployment administrator—owns issuer trust and the
+claims-to-scope mapping for its application.
 
-The exchange request uses `application/x-www-form-urlencoded` parameters:
+Conceptual configuration for an application named `acme-ci`:
 
-- `grant_type` — required; `urn:ietf:params:oauth:grant-type:token-exchange`.
-- `subject_token` — required; the presented Kubernetes ServiceAccount JWT.
-- `subject_token_type` — required; `urn:ietf:params:oauth:token-type:jwt`.
-- `audience` — optional logical target service name; for this endpoint, `quay` is the expected value. This is separate from the Kubernetes JWT's `aud` claim, which is validated against `REQUIRED_AUDIENCE`.
-- `resource` — optional absolute URI identifying the target Quay service. If supported, it must be an absolute URI without a fragment, as required by RFC 8693. `audience` and `resource` are target descriptors for the issued token; they are not substitutes for validating the incoming JWT audience.
-- `scope` — optional space-delimited requested Quay scopes. The requested values must be a subset of the configured scopes for the exact authorized ServiceAccount subject.
-- `requested_token_type` — optional; omitted in the initial profile because the endpoint always issues a standard Quay OAuth access token.
+```yaml
+workload_identity:
+  enabled: true
+  bindings:
+    - issuer: "https://kubernetes.default.svc"
+      audiences: ["quay"]
+      claims:
+        sub: "system:serviceaccount:ci:tekton-pipeline"
+      allowed_scopes: "repo:create repo:read repo:write"
+      max_token_ttl_seconds: 900
+    - issuer: "https://token.actions.githubusercontent.com"
+      audiences: ["quay"]
+      claims:
+        sub: "repo:acme/release:ref:refs/heads/main"
+      allowed_scopes: "repo:read"
+      max_token_ttl_seconds: 600
+```
 
-No `actor_token` is used. The workload's SA JWT is the subject token, and the exchange relies on possession of that bearer credential rather than a separate OAuth client credential. Exact `AUTHORIZED_SUBJECTS` matching, issuer validation, audience validation, and scope allow-lists provide the authorization boundary.
+The binding schema is generic OIDC: Kubernetes ServiceAccounts are represented
+by their ordinary `sub` claim rather than a Kubernetes-specific `SUBJECT`
+field. The initial release matches configured claim names and values exactly;
+no globbing, regular expressions, or implicit namespace/organization mappings
+are permitted.
 
-Example request:
+Issuer configuration is untrusted tenant input. The implementation must:
+
+- require HTTPS and a syntactically valid issuer URL;
+- retrieve discovery metadata and keys only through a hardened, bounded HTTP
+  client: strict timeouts, response-size limits, no redirects, and safe DNS/IP
+  resolution;
+- require the discovery document's `issuer` to exactly match the configured
+  issuer after defined normalization, and obtain keys only from its validated
+  `jwks_uri`;
+- cache discovery and JWKS data with bounded per-issuer memory and refresh
+  behavior, including refresh on a new signing-key ID;
+- apply deployment-level egress/allow controls to prevent SSRF while allowing
+  an administrator to explicitly permit legitimate in-cluster issuer endpoints
+  such as Kubernetes API servers; and
+- audit binding and issuer configuration mutations without recording secrets.
+
+These deployment controls are security guardrails, not a requirement for a
+platform administrator to register every tenant issuer before use.
+
+## 5. Exchange API
+
+Each enabled application exposes an application-specific token-exchange
+endpoint:
 
 ```http
-POST /api/v1/bootstrap/exchange HTTP/1.1
-Host: quay.example.com
+POST /api/v1/organization/{orgname}/applications/{client_id}/workload-identity/exchange
 Content-Type: application/x-www-form-urlencoded
-
-client_id=quay-workload&grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=eyJhbGciOiJSUzI1NiIsImtpZCI6ImN...&subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Ajwt&audience=quay&scope=org%3Aadmin%20repo%3Aread%20repo%3Awrite
 ```
 
-`client_id` is shown only if the deployment chooses to identify the calling workload client separately; it is not required by RFC 8693 and is not a replacement for `subject_token`. If no separate client-authentication mechanism is configured, omit it. The example JWT is intentionally truncated and must never be logged or placed in documentation as a real credential.
+The endpoint is not protected by an existing Quay bearer token or session. The
+presented external JWT is the credential being authenticated. The path selects
+the organization and WIF application; possession of an OAuth client secret is
+not required and must not substitute for JWT validation.
 
-Example successful response:
+The request follows an RFC 8693-aligned profile:
+
+- `grant_type` (required): `urn:ietf:params:oauth:grant-type:token-exchange`
+- `subject_token` (required): externally issued OIDC workload JWT
+- `subject_token_type` (required):
+  `urn:ietf:params:oauth:token-type:jwt`
+- `scope` (optional): requested space-delimited Quay scopes
+- `audience` and `resource` (optional): accepted only when they meet the
+  profile's target-service validation rules
+
+Example:
+
+```http
+POST /api/v1/organization/acme/applications/CLIENT_ID/workload-identity/exchange
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=eyJ...&subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Ajwt&scope=repo%3Aread%20repo%3Awrite
+```
+
+A successful response is non-cacheable:
 
 ```http
 HTTP/1.1 200 OK
+Cache-Control: no-store
+Pragma: no-cache
 Content-Type: application/json
 
 {
   "access_token": "quay-oauth-token-value",
   "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
   "token_type": "Bearer",
-  "expires_in": 3600,
-  "scope": "org:admin repo:read repo:write"
+  "expires_in": 900,
+  "scope": "repo:read repo:write"
 }
 ```
 
-The returned `scope` is the effective scope. It may be narrower than requested after intersecting the request with the exact subject mapping's allowed scope set. `issued_token_type` identifies the returned credential as a normal OAuth access token; `token_type` describes how the caller presents it to Quay.
-
-Example rejection when the subject is valid but requests an unauthorized scope:
-
-```http
-HTTP/1.1 403 Forbidden
-Content-Type: application/json
-
-{
-  "error": "access_denied",
-  "error_description": "requested scope is not authorized for the Kubernetes ServiceAccount"
-}
-```
-
-Example rejection for an invalid or untrusted JWT:
-
-```http
-HTTP/1.1 401 Unauthorized
-Content-Type: application/json
-
-{
-  "error": "invalid_token",
-  "error_description": "Kubernetes ServiceAccount token failed validation"
-}
-```
-
-This is an RFC 8693-aligned profile rather than a generic RFC 8693 Security Token Service: Quay retains its dedicated endpoint, Kubernetes-specific JWT validation, exact subject mapping, and Quay OAuth token lifecycle. It does not support actor/delegation tokens or refresh tokens in the initial profile.
-
-## 5. Validation approach
-
-Quay will validate the SA JWT with the existing OIDC logic.
-It validates token is intended for Quay. It does not by itself authorize Quay access; that is the separate
-mapping.
-
-### Validation flow
-
-The exchange endpoint validates the workload JWT before performing any authorization mapping or token issuance. The workload's JWT is the credential being validated. Quay's own pod-mounted ServiceAccount token is a separate credential: it authenticates Quay's outbound OIDC discovery and JWKS requests to the Kubernetes API server. The mounted `ca.crt` verifies the API server's TLS certificate.
+## 6. Exchange processing
 
 ```mermaid
-flowchart TD
-    A[Workload pod] --> B[Exchange endpoint]
-    B --> C[Read incoming JWT without trusting claims]
-    C --> D{Issuer is trusted}
-    D -->|No| X[Reject: unknown issuer]
-    D -->|Yes| E[Read mounted token and CA]
-    E --> F[Fetch OIDC discovery and JWKS]
-    F --> G{JWKS and metadata valid}
-    G -->|No| Y[Reject: OIDC unavailable]
-    G -->|Yes| H[Select key by JWT key ID]
-    H --> I[Verify JWT signature locally]
-    I --> J{Claims are valid}
-    J -->|No| Z[Reject: invalid signature or claims]
-    J -->|Yes| K[Validated ServiceAccount identity]
-    K --> L[Continue to exact subject mapping]
+flowchart LR
+    W[External workload] -->|OIDC JWT + requested scope| E[Application exchange endpoint]
+    E --> V{Validate issuer, signature, exp, aud, claims}
+    V -->|invalid| R1[Reject and audit]
+    V -->|valid| B{Exact enabled binding exists}
+    B -->|no| R2[Reject and audit]
+    B -->|yes| S{Requested scope is allowed}
+    S -->|no| R3[Reject and audit]
+    S -->|yes| T[Mint bounded OAuth token\nacting as application]
+    T --> A[Return token and audit issuance]
 ```
 
-The JWKS/discovery data should be cached for `JWKS_CACHE_TTL_SECONDS` (1 hour in the example configuration). Quay uses the mounted ServiceAccount token and CA only when it needs to populate or refresh that cache—not for every incoming exchange request. A refresh occurs on cold cache, TTL expiry, or an unknown signing-key `kid`/key-rotation verification failure. The incoming workload JWT is never sent back to Kubernetes for TokenReview; its signature is checked locally against the retrieved JWKS.
+Quay must verify JWT signature, expiration, issuer, and configured audience
+before evaluating a binding. It then exact-matches all configured claims and
+computes the effective scope. Token lifetime is the minimum of the binding's
+maximum TTL, the server's global safety cap, and the remaining lifetime of the
+validated subject token.
 
-The configured issuer and the network URL used to fetch discovery may need to be represented separately in a host-side CRC harness: `https://kubernetes.default.svc` is the JWT issuer inside the cluster, while `https://api.crc.testing:6443` is reachable from the host. In a Quay pod, the configured Kubernetes issuer URL is expected to be directly resolvable.
+No mapping means no access. A valid external JWT never receives Quay authority
+implicitly.
 
-## 6. Authorization mapping
+## 7. Application principal and token persistence
 
-How should a validated identity map to a Quay subject and allowed Management API scopes?
+Existing OAuth tokens currently require an `authorized_user`, and Quay derives
+its authorization identity from that user. This feature introduces an
+application-backed OAuth token subject for WIF-issued tokens instead:
 
-- Explicit configured mapping: cluster/namespace/ServiceAccount → Quay identity + scopes. Strong
-  auditability; more configuration.
-- Kubernetes RBAC-driven mapping: aligns with Kubernetes permissions; scope translation is complex and
-  may couple systems. 
+- a WIF token is associated with its existing `OAuthApplication` and the exact
+  binding that minted it;
+- it has no human or robot `authorized_user`;
+- the auth context resolves it to an application principal scoped to the
+  application's owning organization;
+- authorization checks use the effective OAuth scope string under the
+  application-principal rules; and
+- conventional OAuth tokens retain their current user-backed behavior.
 
-#### Explicit administrator-controlled mapping (preferred working direction)
+This requires a deliberate data-model/auth-context change, rather than a
+hidden dummy user. A binding relationship (or equivalent durable binding ID)
+must be retained on issued WIF tokens so Quay can identify and revoke every
+unexpired token minted by that binding.
 
-Quay validates the ServiceAccount token, then looks up an administrator-created mapping
-from cluster identity, namespace, and ServiceAccount to a Quay subject and an allow-list of Quay
-scopes. Missing or empty authorization configuration denies the exchange; a valid identity is never
-authorized implicitly.
+Token metadata and audit events retain safe workload provenance, for example:
 
-**The mapping must explicitly define:**
-
-- Which cluster or Kubernetes issuer is trusted. (`OIDC_SERVERS`)
-- Namespace and ServiceAccount identity (including audience/issuer constraints where required).
-- The Quay subject to use, such as a robot account or service identity.
-- The permitted Quay organizations, repositories, operations, or Management API scopes.
-- Lifecycle, ownership, audit, and revocation behavior.
-
-Example configuration:
-
-```yaml
-FEATURE_KUBERNETES_SA_BOOTSTRAP: true
-BOOTSTRAP_TOKEN_OWNER: "quay-admin"
-SUPER_USERS:
-  - "quay-admin"
-
-KUBERNETES_SA_BOOTSTRAP_CONFIG:
-  OIDC_SERVERS: 
-    - "https://kubernetes.default.svc"
-  REQUIRED_AUDIENCE: "quay-bootstrap"
-  AUTHORIZED_SUBJECTS:
-    - subject: "system:serviceaccount:quay-operator:controller-manager"
-      scopes: "org:admin repo:admin repo:create repo:read repo:write"
-    - subject: "system:serviceaccount:ci-cd:tekton-pipeline-sa"
-      scopes: "org:admin repo:create repo:read repo:write"  
-  JWKS_CACHE_TTL_SECONDS: 3600
-  BOOTSTRAP_TOKEN_MAX_TTL: 86400  # server-side cap in seconds (caller can request less, never more)
-
+```json
+{
+  "kind": "workload_identity",
+  "organization": "acme",
+  "application_client_id": "CLIENT_ID",
+  "binding_id": "BINDING_ID",
+  "issuer": "https://kubernetes.default.svc",
+  "subject": "system:serviceaccount:ci:tekton-pipeline"
+}
 ```
 
-Mapping will be part of the quay config.
+Quay must never store or log the external JWT or the returned access-token
+secret.
 
-## 7. Token issuance
+## 8. Lifecycle, revocation, and UI
 
-Re-use the existing oauth bootstrap feature to mint an oauth token.
+The first release includes Organization → OAuth Applications UI changes. An org
+admin can:
 
-```mermaid
-flowchart TD
-    A[Validated ServiceAccount identity] --> B[Resolve configured Quay subject]
-    B --> C[Load allowed scopes]
-    C --> D[Check requested scopes]
-    D --> E{Scopes are allowed}
-    E -->|No| X[Reject request]
-    E -->|Yes| F[Check token owner]
-    F --> G{Owner exists}
-    G -->|No| Y[Return owner error]
-    G -->|Yes| H[Mint standard OAuth token]
-    H --> I[Store identity metadata]
-    I --> J[Return token with capped TTL]
-    J --> K[Enforce expiry revocation and audit]
-```
+- enable or disable workload identity for an application;
+- create, view, edit, and remove bindings;
+- configure issuer, audience, exact claims, allowed scopes, and maximum TTL;
+- see WIF-issued token metadata and provenance separately from user-issued
+  application tokens; and
+- revoke individual issued tokens.
 
-Requires an existing super user for ownership of the bootstrap token. Quay will validate that the owner user exists in the DB at exchange time.
-If the owner is deleted from the DB Quay will return a clear error.
+The Management API exposes matching organization-admin resources for
+configuration and automation. Mutations are audited.
 
-The workload presents its ServiceAccount JWT together with the target organization and requested
-Quay scopes. Quay validates the workload identity, applies the selected authorization gate, checks
-that the requested scopes are a subset of the scopes authorized for that identity, and returns a
-standard Quay OAuth bearer token with an expiration. The token then follows the existing Quay OAuth
-lifecycle, including scope enforcement,
-expiration, revocation, and audit behavior.
+Disabling, deleting, or materially changing a binding immediately revokes all
+unexpired tokens issued by that binding and blocks new exchanges. Deleting or
+disabling the WIF application likewise prevents issuance and revokes its
+WIF-issued tokens. Normal expiry remains an additional safety boundary.
 
-Mapping a ServiceAccount JWT directly to a Quay robot
-identity instead of exchanging the JWT for a scoped OAuth token is not viable. 
-Robot accounts only grant push/pull authorization in Quay, which is not enough for the customer's requested use-case.
-Direct robot identity use would also give the workload the robot's standing permissions rather than a separately scoped, 
-time-limited token.
+## 9. Compatibility and rollout
 
-The requested exchange is more secure when Quay enforces both an administrator-defined maximum scope
-set for the workload and the requested scope subset. This provides a least-privilege token boundary
-without allowing the workload to grant itself additional Quay access.
+- The feature is additive and off by default until its schema, APIs, UI, and
+  security controls are available.
+- Existing OAuth clients, user-backed OAuth tokens, robot federation, and
+  programmatic bootstrap continue to work without behavior changes.
+- Existing bootstrap credentials may coexist with org-scoped WIF, but this
+  feature neither depends on nor changes them.
+- Kubernetes ServiceAccount issuers are supported first; the binding schema is
+  intentionally generic so other OIDC workload issuers do not require a new
+  configuration model.
 
-## 8. Compatibility and rollout
+## 10. Test plan and acceptance criteria
 
-- Additive feature, gated by FEATURE_KUBERNETES_SA_BOOTSTRAP and off by default.
-- Existing authentication and programmatic bootstrap remain functional when workload identity is
-  disabled.
-- Existing bootstrap credentials and workload identity may coexist during adoption.
+### Unit and integration coverage
 
-## 9. Focused security decisions
+- Validate discovery/JWKS caching, issuer consistency, signing-key rotation,
+  signature, expiration, audience, and exact-claim matching.
+- Verify malformed, expired, wrong-issuer, wrong-audience, and unauthorized
+  JWTs fail closed without creating a token.
+- Verify scope intersection, application-org isolation, and token TTL bounds.
+- Verify a WIF token resolves to the application principal, not a user or
+  robot, and can perform only the effective permitted Management API actions.
+- Verify conventional user-backed OAuth tokens continue to resolve and
+  authorize unchanged.
+- Verify binding disablement, deletion, and material update revoke all of that
+  binding's unexpired tokens atomically.
+- Verify no bearer credential is emitted in application logs or audit events.
 
-- Reject unknown, invalid, expired, or untrusted identities before token issuance.
-- Enforce requested scopes against the workload’s authorized scopes; never grant broader access by
-  default.
-- Preserve token expiration, revocation, and audit behavior.
-- Record successful issuance and rejected attempts with enough identity and reason context for
-  investigation, without logging bearer tokens.
-    - store SA subject in `token.data` field
-- Define replay and audience requirements for presented ServiceAccount tokens.
-- Exact matches only for `AUTHORIZED_SUBJECTS`, no globbing patterns.
+### End-to-end coverage
 
-## Test Plan / Acceptance Criteria
+- An org admin configures a WIF-enabled application and multiple bindings in
+  the OAuth Applications UI.
+- A matching Kubernetes workload exchanges a projected ServiceAccount JWT and
+  successfully performs allowed Management API operations in that organization.
+- A second matching external OIDC workload can use another binding on the same
+  application.
+- A workload cannot use the token outside the configured scope or organization.
+- Editing or disabling a binding invalidates its already-issued token and
+  prevents a subsequent exchange.
+- Existing bootstrap, human OAuth, and robot-federation flows remain
+  unaffected.
 
-- **Unit tests:** Cover the authentication, mapping, scope, and token-issuance logic.
-- **Integration tests:** Verify Quay’s interaction with the configured Kubernetes identity-validation
-  mechanism and OAuth token store.
-- **End-to-end tests:** Validate the complete workload flow in a supported Kubernetes deployment:
-  - A configured ServiceAccount can exchange its JWT for a standard Quay OAuth token.
-  - The token can perform authorized Management API operations.
-  - The token cannot perform operations outside its granted scopes.
-  - Invalid, expired, wrong-audience, and unauthorized ServiceAccount tokens are rejected.
-  - Requests fail closed when identity validation or authorization is unavailable.
-  - Token expiration, revocation, and audit behavior work as expected.
-  - Existing programmatic bootstrap, human authentication, and non-Kubernetes flows remain unaffected.
-  - Missing token owner in DB throws clear error.
-  - ServiceAccounts from multiple clusters can exchange their tokens with Quay (not limited to single-cluster usecase).
-- **Release confidence:** Test coverage includes upgrade/rollback or version-skew scenarios relevant
-  to the supported deployment model, and the workload-consumer and administrator documentation is
-  sufficient to configure and troubleshoot the feature.
+The shipping bar is:
 
-The core shipping bar is:
-
-> A real Kubernetes workload can obtain a scoped Quay OAuth token, use it successfully within its
-authorization boundary, and is reliably denied outside that boundary—without regressing existing
-authentication flows.
-
-## Assumptions to validate
-Pending validation with customer:
-- Single cluster?  → Do their K8s workloads run on the same cluster as Quay, or do they have cross-cluster scenarios?
-(Assuming cross cluster for now)
-- Which operations?  → Beyond org/repo/robot/federation provisioning, do they need superuser-level operations?
-- How many SAs?  → Small set (operator + CI) or large dynamic set? Exact match should be fine for the former.
-- Coarse scopes OK?  → org:admin grants everything in the org. Fine-grained scoping (RFE-9574) is a separate initiative. Is this acceptable for now?
-- Token TTL?  → Is 24h the right cap? What are their automation patterns (hourly reconciliation vs. daily batch)?
-- Non-K8s automation? → If they also run Terraform/Ansible outside K8s, those need Phase 1 bootstrap or PROJQUAY-10538 M2M (Quay 3.18), not this feature.
-
+> An organization administrator can configure one OAuth application as a
+> non-human workload principal; each explicitly bound external workload can
+> obtain a short-lived, scoped token for that application, while unbound
+> workloads and all authority outside the owning organization are reliably
+> denied.
