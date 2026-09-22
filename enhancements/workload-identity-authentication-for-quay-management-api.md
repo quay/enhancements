@@ -11,6 +11,7 @@ last-updated: 2026-09-22
 status: provisional
 see-also:
   - "https://redhat.atlassian.net/browse/PROJQUAY-11090"
+  - "https://redhat.atlassian.net/browse/PROJQUAY-7803" # Original robot federation implementation
   - "https://github.com/quay/enhancements/pull/45#issuecomment-5626283676"
 ---
 
@@ -188,7 +189,16 @@ password:
 Authorization: Basic base64("acme+ci:QUAY_SIGNED_JWT")
 ```
 
-## 7. Binding lifecycle and revocation
+## 7. Binding storage, lifecycle, and revocation
+
+Bindings are **not** static `config.yaml` configuration, OAuth-application
+configuration, or a standalone database table. They are persisted with the
+mapped robot's `FederatedLogin` record for the `quayrobot` login service, in
+its `metadata_json` field. The `federation_config` array contains the robot's
+bindings, including each binding's issuer, subject, API-scope ceiling, stable
+ID, and version. This keeps the trust mapping colocated with the robot identity
+that it authorizes, while the API/UI remains the supported configuration
+surface.
 
 Each persisted binding receives a stable ID and a version. The issued JWT
 contains both values. On use, Quay verifies that the binding still exists and
