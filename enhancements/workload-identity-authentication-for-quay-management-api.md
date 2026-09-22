@@ -36,7 +36,8 @@ This proposal previously described an organization-owned OAuth application
 that would become a new application principal and mint conventional OAuth
 access tokens. That approach is **not** being pursued.
 
-The implementation direction is Robot Federation:
+The implementation direction is expanding the [already existing Robot Federation](https://redhat.atlassian.net/browse/PROJQUAY-7803)
+to support management api calls:
 
 - Quay's existing non-interactive robot accounts are the workload identities.
 - A federation binding maps a verified external OIDC identity to one robot.
@@ -83,6 +84,7 @@ proposal.
 - Supporting wildcard claims, refresh tokens, or arbitrary delegation chains
   in the initial release.
 - Implicitly granting a personal namespace's permissions to a personal robot.
+- Support for fine-granularity in token binding
 
 ## 4. Robot account model
 
@@ -113,21 +115,9 @@ records.
 ## 5. Authorization model
 
 A federation binding configures the external identity and the maximum Quay API
-scope set for one robot:
-
-```yaml
-robot: acme+ci
-bindings:
-  - issuer: "https://kubernetes.default.svc"
-    subject: "system:serviceaccount:ci:tekton-pipeline"
-    audiences: ["quay"]
-    api_scopes: "repo:create repo:read repo:write"
-```
-
-The issuer and subject must match exactly after the external JWT has passed
-OIDC discovery, signature, expiration, issuer, and audience validation.
-Kubernetes ServiceAccounts are represented through their ordinary `sub` claim;
-the protocol does not require Quay to call Kubernetes APIs.
+scope set for one robot, this has already been setup by the existing federation
+implementation for robots. We will add configuration fields for api scopes as well
+as audience for additional control.
 
 A workload may request a narrower scope string during exchange. It may not
 request scopes outside its binding:
@@ -254,9 +244,6 @@ scope-plus-live-permission authorization rule.
 - Audit records identify the robot and safe external provenance such as issuer
   and subject; they never include bearer secrets.
 
-Local development may allow HTTP discovery only when Quay explicitly runs in
-`DEBUG` mode. This exception is not available in production.
-
 ## 10. Compatibility and rollout
 
 - The federation capability is additive. Existing robot credentials,
@@ -301,10 +288,3 @@ Local development may allow HTTP discovery only when Quay explicitly runs in
 - A robot can bootstrap ownership of a newly created organization only when it
   has the necessary `user:admin` and `org:admin` scope/role combination; the
   intended human owner is then explicitly added to the owners team.
-
-The shipping bar is:
-
-> A bound external workload can obtain a short-lived Quay-signed credential
-> for one non-interactive robot account. It can perform only actions that are
-> permitted by both its issued scopes and the robot's current Quay permissions;
-> humans, bootstrap identities, and unrelated robots are never impersonated.
