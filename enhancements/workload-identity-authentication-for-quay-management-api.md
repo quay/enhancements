@@ -1,5 +1,5 @@
 ---
-title: workload-identity-authentication-for-quay-management-api
+title: robot-federation-for-quay-management-api
 authors:
   - "@Marcusk19"
 reviewers:
@@ -7,362 +7,294 @@ reviewers:
 approvers:
   - TBD
 creation-date: 2026-08-04
-last-updated: 2026-08-19
+last-updated: 2026-09-22
 status: provisional
 see-also:
-  - "https://redhat.atlassian.net/browse/PROJQUAY-12483"
   - "https://redhat.atlassian.net/browse/PROJQUAY-11090"
+  - "https://github.com/quay/enhancements/pull/45#issuecomment-5626283676"
 ---
 
-# Workload Identity Authentication for Quay Management API
+# Robot Federation for Quay Management API
 
 ## 1. Purpose
 
-This proposal adds instance-wide Kubernetes ServiceAccount Workload Identity
-Federation (WIF) for the Quay Management API. A Kubernetes workload presents a
-projected ServiceAccount JWT to Quay and receives a short-lived, scoped Quay
-OAuth bearer token.
+Enable an external workload to exchange its OIDC JWT for a short-lived,
+scoped Quay Robot API JWT. The exchanged credential authenticates as a
+configured Quay robot account, not as a human user, bootstrap owner, or OAuth
+application principal.
 
-This removes the need for automation to impersonate a human administrator.
-Human accounts are unsuitable automation identities: they can be deactivated,
-require lifecycle management in an external identity provider, may consume
-licensed seats, and often need MFA exceptions. Long-lived robot Basic-auth
-tokens are also not the answer: they are separate credentials and this design
-does not use them for WIF.
+The primary use case is CI/CD and Kubernetes workloads that need Quay
+Management API access without storing a human password, a robot secret, or a
+long-lived OAuth credential. The same issued JWT can also be used as the
+password in `robot-username:JWT` Basic authentication for registry token
+exchange.
 
-The feature is intentionally limited to Kubernetes ServiceAccounts and a
-single, instance-wide Quay service identity. It does not introduce a generic
-issuer/claims federation framework or organization-scoped WIF.
+## 2. Change of direction
 
-## 2. Goals and non-goals
+This proposal previously described an organization-owned OAuth application
+that would become a new application principal and mint conventional OAuth
+access tokens. That approach is **not** being pursued.
+
+The implementation direction is Robot Federation:
+
+- Quay's existing non-interactive robot accounts are the workload identities.
+- A federation binding maps a verified external OIDC identity to one robot.
+- Quay issues its own signed Robot API JWT rather than an OAuth token with a
+  hidden user or an application-only authorization model.
+- The robot's existing, live Quay permissions remain the source of authority;
+  token scopes can only reduce those permissions.
+
+This avoids `BOOTSTRAP_TOKEN_OWNER`, the reserved bootstrap application, and
+any login-capable user as an M2M identity. Programmatic bootstrap remains a
+separate, compatible feature and is not modified by this work.
+
+The OAuth-application-principal and org-scoped-WIF design are deferred rather
+than partially implemented. If a future use case cannot be represented by a
+robot identity and its explicit Quay permissions, it requires a separate
+proposal.
+
+## 3. Goals and non-goals
 
 ### Goals
 
-- Authenticate Kubernetes ServiceAccount JWTs from explicitly trusted issuers.
-- Require an explicit, exact workload binding before issuing a token.
-- Issue standard Quay OAuth access tokens with normal scope enforcement.
-- Use a non-human Quay identity rather than a configured human token owner.
-- Preserve programmatic bootstrap and all existing authentication flows.
-- Make token exchange and subsequent Management API actions auditable without
-  recording bearer credentials.
-- Fail closed when identity validation or authorization cannot be completed.
+- Let an external OIDC workload authenticate as an explicitly configured Quay
+  robot account.
+- Support Kubernetes ServiceAccount JWTs first without making the federation
+  protocol Kubernetes-specific.
+- Issue a Quay-signed, short-lived JWT usable with the Management API and the
+  registry token flow.
+- Prevent an exchanged token from granting more authority than the mapped
+  robot has at request time.
+- Make external identity bindings, scope ceilings, and lifecycle changes
+  auditable and revocable.
+- Reuse existing organization robot accounts, team roles, repository
+  permissions, and robot-management UI/API surfaces.
 
 ### Non-goals
 
-- Replacing human authentication or existing programmatic bootstrap.
-- Organization-scoped workload identity.
-- Generic OIDC issuer support or arbitrary claim matching.
-- Kubernetes TokenReview, SubjectAccessReview, CRDs, or Kubernetes RBAC to
-  Quay-scope translation.
-- Wildcard workload identity matching.
-- Refresh tokens, actor tokens, client credentials, `audience`, or `resource`
-  parameters for exchange.
-- A user-facing bulk WIF token-revocation API in the first release.
+- Replacing human authentication, OAuth authorization-code flows, or existing
+  programmatic bootstrap.
+- Creating a new OAuth application principal or a synthetic hidden user.
+- Using Kubernetes `TokenReview`, `SubjectAccessReview`, or Kubernetes RBAC to
+  derive Quay permissions.
+- Deriving authority from external JWT claims beyond selecting a configured
+  binding.
+- Supporting wildcard claims, refresh tokens, or arbitrary delegation chains
+  in the initial release.
+- Implicitly granting a personal namespace's permissions to a personal robot.
 
-## 3. Terminology
+## 4. Robot account model
 
-- **Instance Service Account**: the fixed, non-loginable robot
-  `quay-system+wif`. It is the effective authorized user for every WIF OAuth
-  token and is an explicit Quay superuser while WIF is enabled.
-- **System Organization**: the fixed, non-loginable `quay-system` organization.
-  It contains no human owners-team membership and owns WIF system records.
-- **WIF OAuth Application**: the internal OAuth application
-  `__quay_workload_identity_app`, owned by `quay-system`. It records WIF token
-  lifecycle; it is not the effective principal of an issued token.
-- **Workload Binding**: a configured, immutable authorization mapping with a
-  unique name. It identifies one issuer, Kubernetes namespace, and
-  ServiceAccount name and grants an explicit Quay OAuth scope allow-list.
-- **Workload Provenance**: safe, verified workload information stored with a
-  WIF token and copied to action audit records.
+A robot account is the effective Quay identity for a workload. Robot accounts
+are non-human and cannot use an interactive Quay login. They already appear in
+Quay's authorization model as robot `User` rows, which lets existing permission
+checks, audit attribution, enabled/disabled state, organization membership, and
+repository/team roles apply without impersonating a person.
 
-`BOOTSTRAP_TOKEN_OWNER` remains a legacy bootstrap concept. It has no role in
-WIF provisioning, token issuance, or lifecycle.
+The recommended workload identity is an **organization robot**. An
+organization administrator creates a dedicated robot, assigns only the needed
+team and repository roles, and attaches federation bindings to that robot. A
+robot can therefore act only where it has normal Quay access. For example, a
+CI robot can receive a Creator team role and create repositories in that
+organization, while a separate release robot has only repository write access.
 
-## 4. Architecture
+Personal robots may use the same federation mechanism where supported, but
+are not a substitute for a user's own API token and do not inherit the user's
+personal namespace permissions. Workloads needing personal-user authority
+should use a separately designed user API-token capability, not a robot
+permission expansion.
 
-### 4.1 System identity graph
+This is a deployment-wide federation capability with per-robot bindings. It
+is not an instance-wide shared service principal: two workloads mapped to two
+robots remain separate Quay identities with separate permissions and audit
+records.
 
-When WIF is enabled, Quay idempotently provisions this fixed graph:
+## 5. Authorization model
+
+A federation binding configures the external identity and the maximum Quay API
+scope set for one robot:
+
+```yaml
+robot: acme+ci
+bindings:
+  - issuer: "https://kubernetes.default.svc"
+    subject: "system:serviceaccount:ci:tekton-pipeline"
+    audiences: ["quay"]
+    api_scopes: "repo:create repo:read repo:write"
+```
+
+The issuer and subject must match exactly after the external JWT has passed
+OIDC discovery, signature, expiration, issuer, and audience validation.
+Kubernetes ServiceAccounts are represented through their ordinary `sub` claim;
+the protocol does not require Quay to call Kubernetes APIs.
+
+A workload may request a narrower scope string during exchange. It may not
+request scopes outside its binding:
 
 ```text
-quay-system (System Organization)
-└── quay-system+wif (Instance Service Account robot)
-
-quay-system
-└── __quay_workload_identity_app (WIF OAuth Application)
+issued JWT scopes = requested scopes ∩ binding api_scopes
+runtime authority = issued JWT scopes ∩ robot live Quay permissions
 ```
 
-The robot is marked as an instance-WIF system record. On a later startup, Quay
-may reuse reserved records only when this complete linked graph is present and
-valid. A partial, mismatched, or tenant-owned graph is a startup failure; Quay
-never silently adopts or repairs it. First-time provisioning creates the full
-graph atomically.
+The second intersection is required on every Quay request. Changing the
+robot's team/repository roles, disabling it, or deleting it immediately
+reduces or removes its usable authority even when an issued JWT has not yet
+expired. Token scopes are a ceiling, never an independent privilege grant.
 
-The System Organization cannot use ordinary organization creation because that
-path creates a human owner-team membership. System records are hidden from
-tenant-facing listings and UI, and ordinary mutation and deletion are rejected.
-They remain protected if WIF is later disabled, so that a re-enable cannot turn
-them into tenant-managed records.
+`direct_user_login` is never issued to a Robot API JWT. The feature-gated
+`super:user` scope requires both deliberate issuance by a superuser and a
+robot that remains a live superuser at use time. Normal CI organization
+creation uses `user:admin`; it does not require `super:user` unless a
+particular deployment has enabled a superuser-only organization-creation
+policy.
 
-While WIF is enabled, ordinary tenant operations cannot create or use the
-reserved names. On an instance where WIF has never been enabled, those names
-are not proactively reserved. If a legacy or tenant record uses a reserved name
-when WIF is enabled later, enablement fails safely.
+## 6. Federation exchange
 
-The Instance Service Account retains its normally generated Robot Token, but
-WIF never uses it and no WIF-specific Robot Token API scopes are required.
-Robot Basic-auth Management API access is independent work.
-
-### 4.2 Token identity and privilege
-
-Each successful exchange creates a standard Quay OAuth access token with:
-
-- `authorized_user` set to `quay-system+wif`;
-- `application` set to `__quay_workload_identity_app`;
-- requested effective OAuth scopes; and
-- verified Workload Provenance in token data.
-
-The Instance Service Account is recognized as a superuser only while WIF is
-enabled; administrators do not add it to `SUPER_USERS`. Existing OAuth
-permission behavior still applies: superuser authorization requires the token
-to contain `super:user`. The robot's status alone does not bypass OAuth scopes.
-`super:user` is allowed only when an exact Workload Binding explicitly grants
-it. `direct_user_login` is never valid for WIF.
-
-The WIF OAuth Application is an internal token-lifecycle record, not a general
-OAuth client. Standard OAuth authorization and client-credential flows reject
-it even if its identifier or generated secret is known. Only the WIF exchange
-endpoint can issue tokens through it.
-
-### 4.3 Kubernetes JWT validation
-
-Quay validates the incoming workload JWT locally using OIDC discovery and JWKS
-for the configured Kubernetes issuer. The workload JWT is never sent to
-Kubernetes TokenReview or another remote token-validation endpoint.
-
-Quay's own mounted ServiceAccount bearer token and CA certificate are separate
-credentials. Quay uses them only to authenticate and secure its outbound
-Kubernetes discovery/JWKS requests. They are not the workload identity.
-
-Validation requires:
-
-- a configured, trusted issuer;
-- HTTPS, no redirects, and a JWKS endpoint constrained to the discovery
-  document's origin;
-- a valid JWT signature using the issuer's JWKS;
-- internally consistent Kubernetes ServiceAccount claims;
-- a configured deployment-specific JWT audience; and
-- valid JWT lifetime.
-
-Discovery and JWKS are cached. Static WIF configuration is validated at
-startup, but discovery/JWKS retrieval is lazy so a temporary Kubernetes API
-outage does not prevent Quay from starting. An exchange fails closed when keys
-or discovery cannot be obtained or validated.
-
-The identity selector is issuer plus Kubernetes namespace and ServiceAccount
-name. It intentionally does not pin the ServiceAccount UID. An issuer,
-namespace, and ServiceAccount name tuple may have exactly one binding.
-
-### 4.4 Authorization and issuance
-
-A valid Kubernetes identity is not Quay authorization. Quay finds one exact
-Workload Binding and verifies that every requested scope is in its explicit
-allow-list. There are no default scopes, no wildcard matches, and no scope
-union across bindings.
-
-WIF may be enabled with zero bindings to support staged deployment. In that
-state the system graph exists but every exchange is denied until an
-administrator adds a binding.
-
-The incoming JWT must have at least 60 seconds of validated remaining lifetime.
-The issued OAuth token has no refresh token and expires at the earlier of:
-
-1. 3600 seconds after issuance; or
-2. the incoming ServiceAccount JWT expiry.
-
-Removing a binding blocks new exchanges immediately. Existing WIF tokens remain
-valid until their normal expiry. Disabling WIF likewise blocks new exchanges but
-does not revoke or delete existing WIF tokens; they remain valid for at most
-one hour. Disabling does not delete the system graph.
-
-```mermaid
-flowchart LR
-    W[Workload] -->|ServiceAccount JWT and scopes| E[WIF exchange]
-    E --> V{Validate Kubernetes JWT}
-    V -->|invalid or unavailable| R1[Reject]
-    V -->|valid| B{Exact Workload Binding}
-    B -->|none| R2[Reject]
-    B -->|found| S{Non-empty allowed scope subset}
-    S -->|no| R3[Reject]
-    S -->|yes| T[Issue WIF OAuth Token]
-    T --> W
-```
-
-## 5. Exchange contract
-
-`POST /api/v1/workload/exchange` is a Quay-specific,
-[RFC 8693](https://datatracker.ietf.org/doc/html/rfc8693)-aligned token-exchange
-profile. It is not a general Security Token Service.
-
-The request uses `application/x-www-form-urlencoded` and permits only:
-
-- `grant_type` (required):
-  `urn:ietf:params:oauth:grant-type:token-exchange`
-- `subject_token` (required): Kubernetes ServiceAccount JWT
-- `subject_token_type` (required):
-  `urn:ietf:params:oauth:token-type:jwt`
-- `scope` (required): non-empty, space-delimited Quay OAuth scope subset
-
-The endpoint rejects unsupported parameters including `audience`, `resource`,
-`actor_token`, refresh-token parameters, `client_id`, and client secrets.
-
-Example request:
+The workload presents its external JWT using the mapped robot username and
+HTTP Basic authentication to the federation endpoint:
 
 ```http
-POST /api/v1/workload/exchange HTTP/1.1
-Host: quay.example.com
-Content-Type: application/x-www-form-urlencoded
-
-grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=eyJhbGciOiJSUzI1NiIsImtpZCI6Im...&subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Ajwt&scope=super%3Auser
+GET /oauth2/federation/robot/token?scope=repo:create%20repo:read
+Authorization: Basic base64("acme+ci:EXTERNAL_OIDC_JWT")
 ```
 
-Example response:
+Quay validates the external JWT and its binding, then returns a Quay-signed
+Robot API JWT:
 
-```http
-HTTP/1.1 200 OK
-Content-Type: application/json
-
+```json
 {
-  "access_token": "quay-oauth-token-value",
-  "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
-  "token_type": "Bearer",
-  "expires_in": 1800,
-  "scope": "super:user"
+  "token": "<quay-signed-robot-api-jwt>"
 }
 ```
 
-`expires_in` reflects the actual shorter lifetime when the ServiceAccount JWT
-expires before the 3600-second WIF maximum. The example credential is
-intentionally truncated. Neither it nor a real JWT may be logged.
+The returned token includes the robot subject, its issued `api_scopes`, and
+the federation binding ID and version. Federation-issued tokens have a fixed,
+short lifetime (one hour in the initial implementation). They are not stored
+as OAuth access-token records and Quay never stores the presented external JWT
+or returns it in audit events.
 
-Expected rejection classes include `invalid_request` for malformed or
-unsupported requests, `invalid_grant` for an invalid, expired, wrong-audience,
-or too-short-lived ServiceAccount JWT, and `access_denied` for no matching
-binding or an unauthorized requested scope.
+A binding with no `api_scopes` preserves existing registry-only federation
+behavior. A non-empty `api_scopes` claim marks the JWT as eligible for scoped
+Management API Bearer authentication:
 
-## 6. Configuration
-
-WIF uses an independent feature flag and configuration, separate from legacy
-programmatic bootstrap. The configuration contains trusted Kubernetes issuer
-information, a deployment-specific required JWT audience, discovery/JWKS cache
-settings, and Workload Bindings.
-
-Illustrative configuration:
-
-```yaml
-FEATURE_KUBERNETES_SERVICE_ACCOUNT_WIF: true
-KUBERNETES_SERVICE_ACCOUNT_WIF_CONFIG:
-  OIDC_SERVERS:
-    - "https://kubernetes.default.svc"
-  REQUIRED_AUDIENCE: "quay-management-api"
-  JWKS_CACHE_TTL_SECONDS: 3600
-  WORKLOAD_BINDINGS:
-    - NAME: "quay-operator-controller"
-      ISSUER: "https://kubernetes.default.svc"
-      NAMESPACE: "quay-operator"
-      SERVICE_ACCOUNT: "controller-manager"
-      SCOPES:
-        - "super:user"
+```http
+Authorization: Bearer <quay-signed-robot-api-jwt>
 ```
 
-Binding names are required, immutable, and unique. The issuer/namespace/
-ServiceAccount identity tuple is also unique. The configuration rejects empty
-scope allow-lists and `direct_user_login`.
+For registry token exchange, callers use the same JWT as the Basic-auth
+password:
 
-The final schema field spelling follows Quay configuration conventions; this
-example specifies the required semantics rather than a final serialized schema.
+```http
+Authorization: Basic base64("acme+ci:QUAY_SIGNED_JWT")
+```
 
-## 7. Audit and asynchronous work
+## 7. Binding lifecycle and revocation
 
-At exchange time, Quay stores only safe verified provenance in the OAuth token:
+Each persisted binding receives a stable ID and a version. The issued JWT
+contains both values. On use, Quay verifies that the binding still exists and
+that its version matches.
 
-- Instance Service Account;
-- issuer;
-- normalized Kubernetes ServiceAccount subject;
-- Workload Binding name;
-- OAuth token UUID; and
-- effective scope.
+Consequently, editing a binding, deleting it, or deleting federation
+configuration immediately invalidates all federation JWTs issued under the
+previous binding version. This supplies revocation without persisting every
+one-hour exchanged JWT. Robot disablement and live authorization checks remain
+additional immediate revocation boundaries.
 
-Central action logging copies this provenance for Management API actions
-performed synchronously with the token. It never stores or logs the source JWT
-or returned OAuth secret.
+Binding configuration is managed on the robot, through the existing personal
+or organization robot-management resource and UI. Mutations are audit logged.
+The initial schema includes issuer, subject, API scopes, and binding identity;
+production Kubernetes workload federation also requires audience validation.
+Audience configuration is a required completion item before this is considered
+production-ready. Legacy audience-less bindings are transitional only and must
+be deprecated rather than treated as the steady-state security model.
 
-Request-local OAuth context is unavailable to background workers. Therefore a
-WIF-authenticated API path may enqueue asynchronous work only when its job
-payload or persisted task metadata explicitly carries safe Workload Provenance.
-An asynchronous path that cannot preserve provenance rejects WIF authentication
-until it is updated.
+## 8. Human-created Robot API Tokens
 
-## 8. Compatibility and rollout
+Robot Federation is complemented, not replaced, by Robot API Tokens created by
+a signed-in human who is allowed to manage that robot.
 
-The feature is additive and disabled by default. It does not change existing
-human authentication, robot registry authentication, robot Basic-auth API work,
-or programmatic bootstrap. Bootstrap retains its feature/configuration,
-`__quay_bootstrap_app`, endpoint, ownership, cleanup, and audit lifecycle.
+A human-created Robot API Token is also a Quay-signed Robot API JWT, but has
+recorded lifecycle metadata: display name, creator, expiry, revocation time,
+and last-accessed time. It defaults to 30 days and is capped at 90 days. The
+owner can list and revoke its active tokens through the Robot Tokens UI/API.
 
-Rollout sequence:
+Federation-issued and human-created tokens deliberately use different
+lifecycle mechanisms:
 
-1. Configure issuer discovery, required audience, and zero or more bindings.
-2. Enable WIF; Quay atomically provisions and validates the protected system
-   identity graph.
-3. Add exact bindings in a staged deployment, beginning with least privilege.
-4. Monitor exchange and action audit records.
-5. Disable WIF to stop new exchanges if necessary; existing tokens naturally
-   expire within one hour.
+| Credential source | Lifetime | Persistent token record | Revocation |
+| --- | --- | --- | --- |
+| Human-created Robot API Token | Default 30 days; maximum 90 days | Yes | Soft revoke the token record |
+| Federated Robot API JWT | Fixed one hour | No | Change/delete binding, disable robot, or change robot access |
 
-## 9. Test plan and acceptance criteria
+Both forms authenticate as the same robot and are subject to the same
+scope-plus-live-permission authorization rule.
+
+## 9. Security requirements
+
+- Production issuer discovery requires HTTPS, exact issuer matching, hardened
+  HTTP retrieval, bounded caching, no unsafe redirects, and SSRF-aware egress
+  controls.
+- Quay verifies JWT signature, expiration, issuer, and configured audience
+  before selecting a binding.
+- Bindings use exact external subjects in the initial release; no globs or
+  regular expressions are permitted.
+- Quay must not log the external JWT or the returned Quay JWT.
+- CSRF exemptions apply only to valid scoped Robot API JWT requests, not to
+  arbitrary robot credentials.
+- Audit records identify the robot and safe external provenance such as issuer
+  and subject; they never include bearer secrets.
+
+Local development may allow HTTP discovery only when Quay explicitly runs in
+`DEBUG` mode. This exception is not available in production.
+
+## 10. Compatibility and rollout
+
+- The federation capability is additive. Existing robot credentials,
+  registry-only federation bindings, OAuth clients, human tokens, and
+  programmatic bootstrap retain their behavior.
+- Existing federation bindings without API scopes continue to issue
+  registry-only JWTs and cannot call the Management API.
+- API scope support, binding ID/version invalidation, and audience validation
+  are rolled out behind the normal feature/configuration controls.
+- Documentation and UI should guide CI users toward a dedicated organization
+  robot with narrowly assigned roles and a short-lived exchanged token.
+
+## 11. Test plan and acceptance criteria
 
 ### Unit and integration coverage
 
-- Validate issuer, signature, JWKS refresh/key rotation, audience, expiry, and
-  internally consistent Kubernetes ServiceAccount claims.
-- Verify no workload JWT is sent to TokenReview.
-- Verify cache misses and Kubernetes discovery/JWKS failures fail closed while
-  startup remains possible.
-- Verify exact matching, required unique binding names and identity tuples,
-  no wildcard or union behavior, zero-binding behavior, and scope-subset
-  enforcement.
-- Reject omitted/empty scopes, unsupported exchange parameters, and
-  `direct_user_login`.
-- Verify `super:user` works only when explicitly bound and the Instance Service
-  Account is recognized as superuser while WIF is enabled.
-- Verify source JWT lifetime cap, 60-second minimum remaining lifetime, 3600
-  second maximum, and no refresh token.
-- Verify first provisioning is atomic; valid graphs are reused; partial,
-  mismatched, and tenant-collision graphs fail safely.
-- Verify system records are hidden/protected and WIF OAuth Application rejects
-  ordinary OAuth flows.
-- Verify WIF tokens use the Instance Service Account as `authorized_user`, not
-  `BOOTSTRAP_TOKEN_OWNER`, and bootstrap lifecycle remains unchanged.
-- Verify safe provenance reaches token and synchronous action audit records;
-  verify WIF is rejected on asynchronous paths without provenance propagation.
+- Validate OIDC discovery/JWKS retrieval, signature, expiration, issuer,
+  audience, and exact-subject matching.
+- Verify an exchange rejects missing, malformed, expired, wrong-issuer,
+  wrong-audience, or unbound JWTs.
+- Verify requested scopes cannot exceed the binding scopes.
+- Verify a valid JWT remains constrained by current robot permissions and is
+  denied after robot disablement or permission removal.
+- Verify Management API Bearer authentication and registry Basic token exchange
+  work for scoped Robot API JWTs.
+- Verify `direct_user_login` cannot be issued and `super:user` remains
+  feature-gated and live-robot-gated.
+- Verify binding update/deletion invalidates already issued federation JWTs.
+- Verify human-created token expiry, listing, last-use tracking, active-token
+  limits, and soft revocation.
 
 ### End-to-end coverage
 
-In a supported Kubernetes deployment, verify that:
+- An organization admin configures a dedicated organization robot with a
+  Kubernetes ServiceAccount binding and narrow API scopes.
+- The workload exchanges a projected ServiceAccount JWT and creates or reads
+  only resources allowed by both the token scope and the robot's roles.
+- The same JWT completes a registry token exchange only for repositories the
+  robot may access.
+- A workload requesting an unbound scope, using another robot name, or using
+  a changed/deleted binding is denied.
+- A robot can bootstrap ownership of a newly created organization only when it
+  has the necessary `user:admin` and `org:admin` scope/role combination; the
+  intended human owner is then explicitly added to the owners team.
 
-- a bound ServiceAccount exchanges its projected JWT and uses the resulting
-  bearer token for an allowed Management API operation;
-- the token cannot perform actions outside its scopes;
-- unbound, wrong-issuer, wrong-audience, expired, tampered, and near-expiry JWTs
-  are denied;
-- a removed binding and disabled WIF block new exchanges;
-- already-issued tokens remain usable only through their normal maximum
-  lifetime after binding removal or WIF disablement;
-- action audits identify the WIF binding and verified workload provenance; and
-- human authentication, programmatic bootstrap, registry robot tokens, and
-  non-WIF OAuth flows continue to work.
+The shipping bar is:
 
-The shipping bar is that a real Kubernetes workload can obtain a bounded Quay
-OAuth token and use it only within an explicit authorization boundary, without
-a human owner or stored workload credential.
+> A bound external workload can obtain a short-lived Quay-signed credential
+> for one non-interactive robot account. It can perform only actions that are
+> permitted by both its issued scopes and the robot's current Quay permissions;
+> humans, bootstrap identities, and unrelated robots are never impersonated.
