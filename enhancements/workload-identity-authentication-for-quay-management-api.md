@@ -7,7 +7,7 @@ reviewers:
 approvers:
   - TBD
 creation-date: 2026-08-04
-last-updated: 2026-09-22
+last-updated: 2026-09-25
 status: provisional
 see-also:
   - "https://redhat.atlassian.net/browse/PROJQUAY-11090"
@@ -178,6 +178,67 @@ password:
 ```http
 Authorization: Basic base64("acme+ci:QUAY_SIGNED_JWT")
 ```
+
+### 6.1 RFC 8693-compatible STS endpoint
+
+In addition to the existing Basic-authentication endpoint, Quay provides a
+standards-oriented token-exchange interface for workloads that use OAuth 2.0
+Token Exchange ([RFC 8693](https://www.rfc-editor.org/rfc/rfc8693)). It is a
+separate, additive interface; it does not change the legacy endpoint or
+Quay's existing authorization-code endpoints.
+
+```http
+POST /sts/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=urn:ietf:params:oauth:grant-type:token-exchange
+&subject_token=<EXTERNAL_OIDC_JWT>
+&subject_token_type=urn:ietf:params:oauth:token-type:jwt
+&resource=urn:quay:robot:acme+ci
+&scope=repo:read
+&requested_token_type=urn:ietf:params:oauth:token-type:access_token
+```
+
+`grant_type`, `subject_token`, `subject_token_type`, and `resource` are
+required. `scope` and `requested_token_type` are optional;
+`requested_token_type`, when supplied, must be the access-token URN shown
+above. The endpoint accepts only form-encoded requests.
+
+The required resource URI has the form `urn:quay:robot:<full-robot-username>`.
+It selects the target robot before external-token validation. Quay must never
+infer the robot from an external JWT claim, so a valid token for one robot
+cannot be exchanged for another robot's Quay credential.
+
+On success, the endpoint returns the same short-lived, Quay-signed Robot API
+JWT issued by the legacy endpoint, using RFC 8693 response fields:
+
+```json
+{
+  "access_token": "<quay-signed-robot-api-jwt>",
+  "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+  "token_type": "Bearer",
+  "expires_in": 3600,
+  "scope": "repo:read"
+}
+```
+
+The endpoint does not issue refresh tokens or create persistent token-lifecycle
+records. Omitting `scope` uses the binding's API-scope ceiling; supplying one
+can only narrow that ceiling. For a legacy registry-only binding without
+`api_scopes`, the returned `scope` is empty and the JWT has no API-scope claim.
+
+OAuth error responses are JSON with HTTP 400 and a non-secret error code:
+`invalid_request` for missing or unsupported request parameters,
+`unsupported_grant_type` for a different grant type, `invalid_target` for an
+invalid or unknown robot resource, and `invalid_grant` for failed external JWT,
+binding, audience, subject, or scope validation. Errors and logs must not
+include the external JWT, Quay JWT, authorization header, or decoded claims.
+
+The route name is a Quay deployment choice rather than an RFC 8693
+requirement. RFC 8693 standardizes the form parameters and token types, while
+the authorization server advertises or documents its token-exchange endpoint.
+`/sts/token` makes this workload-token exchange distinct from Quay's existing
+OAuth authorization-code flow.
 
 ## 7. Binding storage, lifecycle, and revocation
 
