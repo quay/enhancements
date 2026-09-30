@@ -1,5 +1,5 @@
 ---
-title: robot-federation-for-quay-management-api
+title: robot-api-tokens-and-federated-exchange
 authors:
   - "@Marcusk19"
 reviewers:
@@ -7,7 +7,7 @@ reviewers:
 approvers:
   - TBD
 creation-date: 2026-08-04
-last-updated: 2026-09-25
+last-updated: 2026-09-30
 status: provisional
 see-also:
   - "https://redhat.atlassian.net/browse/PROJQUAY-11090"
@@ -15,20 +15,28 @@ see-also:
   - "https://github.com/quay/enhancements/pull/45#issuecomment-5626283676"
 ---
 
-# Robot Federation for Quay Management API
+# Robot API Tokens and Federated Exchange
 
 ## 1. Purpose
 
-Enable an external workload to exchange its OIDC JWT for a short-lived,
-scoped Quay Robot API JWT. The exchanged credential authenticates as a
-configured Quay robot account, not as a human user, bootstrap owner, or OAuth
-application principal.
+Add scoped Robot API Tokens for Quay Management API access. The capability has
+two credential forms:
 
-The primary use case is CI/CD and Kubernetes workloads that need Quay
-Management API access without storing a human password, a robot secret, or a
-long-lived OAuth credential. The same issued JWT can also be used as the
-password in `robot-username:JWT` Basic authentication for registry token
-exchange.
+- **Managed Robot API Tokens** are opaque, expiring `qro_` credentials created
+  by an authorized signed-in human and backed by persistent lifecycle records.
+- **Federated Robot API Tokens** are short-lived, Quay-signed JWTs issued by
+  `/sts/token` after Quay validates an external OIDC workload identity against
+  a robot federation binding.
+
+Both forms authenticate as a configured Quay robot account, not as a human
+user, bootstrap owner, or OAuth application principal.
+
+The primary federation use case is CI/CD and Kubernetes workloads that need
+Quay Management API access without storing a human password, a robot secret,
+or a long-lived OAuth credential. A Federated Robot API Token can also be used
+as the password in `robot-username:JWT` Basic authentication for registry
+token exchange. Existing Robot Federation remains a separate registry-only
+credential flow.
 
 ## 2. Change of direction
 
@@ -36,13 +44,16 @@ This proposal previously described an organization-owned OAuth application
 that would become a new application principal and mint conventional OAuth
 access tokens. That approach is **not** being pursued.
 
-The implementation direction is expanding the [already existing Robot Federation](https://redhat.atlassian.net/browse/PROJQUAY-7803)
-to support management api calls:
+The implementation direction builds on the trust mappings from
+[existing Robot Federation](https://redhat.atlassian.net/browse/PROJQUAY-7803)
+without changing its registry-only token contract:
 
 - Quay's existing non-interactive robot accounts are the workload identities.
 - A federation binding maps a verified external OIDC identity to one robot.
-- Quay issues its own signed Robot API JWT rather than an OAuth token with a
-  hidden user or an application-only authorization model.
+- A dedicated STS endpoint issues a scoped Robot API JWT rather than an OAuth
+  token with a hidden user or an application-only authorization model.
+- The legacy Robot Federation endpoint continues to issue registry-only robot
+  credentials without Management API scopes.
 - The robot's existing, live Quay permissions remain the source of authority;
   token scopes can only reduce those permissions.
 
@@ -114,16 +125,16 @@ records.
 
 ## 5. Authorization model
 
-A federation binding configures the external identity and the maximum Quay API
-scope set for one robot, this has already been setup by the existing federation
-implementation for robots. We will add configuration fields for api scopes as well
-as audience for additional control.
+A federation binding configures the external identity, allowed OIDC audiences,
+and maximum Quay API scope set for one robot. This extends the existing robot
+federation binding with API-scope and audience controls.
 
-A workload may request a narrower scope string during exchange. It may not
-request scopes outside its binding:
+A workload may request a narrower scope string during exchange. Omitting the
+scope uses the binding's full API-scope ceiling. A request containing any scope
+outside that ceiling is rejected rather than silently intersected:
 
 ```text
-issued JWT scopes = requested scopes ∩ binding api_scopes
+issued JWT scopes = requested scopes, only when requested scopes ⊆ binding api_scopes
 runtime authority = issued JWT scopes ∩ robot live Quay permissions
 ```
 
@@ -141,50 +152,37 @@ policy.
 
 ## 6. Federation exchange
 
-The workload presents its external JWT using the mapped robot username and
-HTTP Basic authentication to the federation endpoint:
+### 6.1 Legacy registry-only endpoint
+
+Existing Robot Federation retains its original contract. The workload presents
+its external JWT using the mapped robot username and HTTP Basic authentication:
 
 ```http
-GET /oauth2/federation/robot/token?scope=repo:create%20repo:read
+GET /oauth2/federation/robot/token
 Authorization: Basic base64("acme+ci:EXTERNAL_OIDC_JWT")
 ```
 
-Quay validates the external JWT and its binding, then returns a Quay-signed
-Robot API JWT:
+After validating the external JWT and binding, Quay returns a temporary
+registry-only robot credential:
 
 ```json
 {
-  "token": "<quay-signed-robot-api-jwt>"
+  "token": "<quay-signed-registry-only-robot-jwt>"
 }
 ```
 
-The returned token includes the robot subject, its issued `api_scopes`, and
-the federation binding ID and version. Federation-issued tokens have a fixed,
-short lifetime (one hour in the initial implementation). They are not stored
-as OAuth access-token records and Quay never stores the presented external JWT
-or returns it in audit events.
+This endpoint never adds `api_scopes`, even when the binding contains an API
+scope ceiling or the request supplies a `scope` query parameter. Its response
+cannot be used as a Management API Bearer credential. This preserves existing
+Robot Federation behavior independently from Federated Robot API Token
+exchange.
 
-A binding with no `api_scopes` preserves existing registry-only federation
-behavior. A non-empty `api_scopes` claim marks the JWT as eligible for scoped
-Management API Bearer authentication:
+### 6.2 RFC 8693-compatible STS endpoint
 
-```http
-Authorization: Bearer <quay-signed-robot-api-jwt>
-```
-
-For registry token exchange, callers use the same JWT as the Basic-auth
-password:
-
-```http
-Authorization: Basic base64("acme+ci:QUAY_SIGNED_JWT")
-```
-
-### 6.1 RFC 8693-compatible STS endpoint
-
-In addition to the existing Basic-authentication endpoint, Quay provides a
-standards-oriented token-exchange interface for workloads that use OAuth 2.0
-Token Exchange ([RFC 8693](https://www.rfc-editor.org/rfc/rfc8693)). It is a
-separate, additive interface; it does not change the legacy endpoint or
+Quay provides a standards-oriented interface for Federated Robot API Tokens
+using OAuth 2.0 Token Exchange
+([RFC 8693](https://www.rfc-editor.org/rfc/rfc8693)). It is a separate,
+additive interface; it does not change the legacy registry-only endpoint or
 Quay's existing authorization-code endpoints.
 
 ```http
@@ -209,8 +207,8 @@ It selects the target robot before external-token validation. Quay must never
 infer the robot from an external JWT claim, so a valid token for one robot
 cannot be exchanged for another robot's Quay credential.
 
-On success, the endpoint returns the same short-lived, Quay-signed Robot API
-JWT issued by the legacy endpoint, using RFC 8693 response fields:
+On success, the endpoint returns a short-lived, Quay-signed Robot API JWT using
+RFC 8693 response fields:
 
 ```json
 {
@@ -223,16 +221,35 @@ JWT issued by the legacy endpoint, using RFC 8693 response fields:
 ```
 
 The endpoint does not issue refresh tokens or create persistent token-lifecycle
-records. Omitting `scope` uses the binding's API-scope ceiling; supplying one
-can only narrow that ceiling. For a legacy registry-only binding without
-`api_scopes`, the returned `scope` is empty and the JWT has no API-scope claim.
+records. The JWT includes the robot subject, issued `api_scopes`, and federation
+binding ID and version, and has a fixed one-hour lifetime in the initial
+implementation. Omitting `scope` uses the binding's API-scope ceiling;
+supplying one can only narrow that ceiling. A binding without `api_scopes`
+cannot produce a Management API credential through STS.
 
-OAuth error responses are JSON with HTTP 400 and a non-secret error code:
-`invalid_request` for missing or unsupported request parameters,
-`unsupported_grant_type` for a different grant type, `invalid_target` for an
-invalid or unknown robot resource, and `invalid_grant` for failed external JWT,
-binding, audience, subject, or scope validation. Errors and logs must not
-include the external JWT, Quay JWT, authorization header, or decoded claims.
+The JWT is accepted as a Management API Bearer credential:
+
+```http
+Authorization: Bearer <quay-signed-robot-api-jwt>
+```
+
+It can also be used as the Basic-auth password for registry token exchange:
+
+```http
+Authorization: Basic base64("acme+ci:QUAY_SIGNED_JWT")
+```
+
+OAuth error responses are JSON with a non-secret error code. Parameter and
+validation failures return HTTP 400 with `invalid_request`,
+`unsupported_grant_type`, `invalid_target`, or `invalid_grant`. Rate-limit
+exhaustion returns HTTP 429 with `slow_down` and `Retry-After`; inability to
+reach the shared rate-limit store returns HTTP 503 with
+`temporarily_unavailable`.
+
+The endpoint accepts only form-encoded requests, limits the full request to 32
+KiB, and limits `subject_token` to 24 KiB. Rate limiting is keyed by source IP
+and robot in a fixed window. Errors and logs must not include the external JWT,
+Quay JWT, authorization header, or decoded claims.
 
 The route name is a Quay deployment choice rather than an RFC 8693
 requirement. RFC 8693 standardizes the form parameters and token types, while
@@ -261,34 +278,47 @@ previous binding version. This supplies revocation without persisting every
 one-hour exchanged JWT. Robot disablement and live authorization checks remain
 additional immediate revocation boundaries.
 
-Binding configuration is managed on the robot, through the existing personal
+Binding configuration is managed on the robot through the existing personal
 or organization robot-management resource and UI. Mutations are audit logged.
-The initial schema includes issuer, subject, API scopes, and binding identity;
-production Kubernetes workload federation also requires audience validation.
-Audience configuration is a required completion item before this is considered
-production-ready. Legacy audience-less bindings are transitional only and must
-be deprecated rather than treated as the steady-state security model.
+The schema includes issuer, subject, API scopes, stable binding identity, and a
+non-empty audience allowlist. New or updated bindings default to `["quay"]`
+when no audience is supplied. Quay requires the external JWT's `aud` claim to
+intersect the configured allowlist.
 
-## 8. Human-created Robot API Tokens
+Legacy persisted bindings without an audience remain temporarily usable with a
+deprecation warning. They are transitional compatibility data, not the
+steady-state security model.
 
-Robot Federation is complemented, not replaced, by Robot API Tokens created by
-a signed-in human who is allowed to manage that robot.
+## 8. Managed Robot API Tokens
 
-A human-created Robot API Token is also a Quay-signed Robot API JWT, but has
-recorded lifecycle metadata: display name, creator, expiry, revocation time,
-and last-accessed time. It defaults to 30 days and is capped at 90 days. The
-owner can list and revoke its active tokens through the Robot Tokens UI/API.
+Federated exchange is complemented by Managed Robot API Tokens created by a
+signed-in human who is allowed to administer the robot.
 
-Federation-issued and human-created tokens deliberately use different
-lifecycle mechanisms:
+A Managed Robot API Token is an opaque credential with the `qro_` prefix, not a
+JWT. Quay stores its secret using credential hashing and returns the plaintext
+value only in the create response. Subsequent list and detail responses expose
+metadata but never return the secret.
 
-| Credential source | Lifetime | Persistent token record | Revocation |
-| --- | --- | --- | --- |
-| Human-created Robot API Token | Default 30 days; maximum 90 days | Yes | Soft revoke the token record |
-| Federated Robot API JWT | Fixed one hour | No | Change/delete binding, disable robot, or change robot access |
+The persistent record contains display name, creator, API-scope ceiling,
+expiry, revocation time, and last-accessed time. Tokens default to 30 days and
+are capped at 90 days. They can be listed and soft-revoked independently
+through user- and organization-robot lifecycle API routes and the Robot Tokens
+UI. Creating, revoking, expiring, or rotating one does not rotate the robot's
+static registry credential.
+
+Federated and Managed Robot API Tokens deliberately use different credential
+formats and lifecycle mechanisms:
+
+| Credential form | Format | Lifetime | Persistent token record | Revocation |
+| --- | --- | --- | --- | --- |
+| Managed Robot API Token | Opaque `qro_` credential | Default 30 days; maximum 90 days | Yes | Soft revoke the token record |
+| Federated Robot API Token | Quay-signed JWT | Fixed one hour | No | Change/delete binding, disable robot, or change robot access |
 
 Both forms authenticate as the same robot and are subject to the same
-scope-plus-live-permission authorization rule.
+scope-plus-live-permission authorization rule. Managed credentials are valid
+for Management API Bearer authentication and robot Basic authentication. They
+cannot contain `direct_user_login`, and their plaintext value is not
+recoverable after creation.
 
 ## 9. Security requirements
 
@@ -299,23 +329,42 @@ scope-plus-live-permission authorization rule.
   before selecting a binding.
 - Bindings use exact external subjects in the initial release; no globs or
   regular expressions are permitted.
-- Quay must not log the external JWT or the returned Quay JWT.
-- CSRF exemptions apply only to valid scoped Robot API JWT requests, not to
-  arbitrary robot credentials.
-- Audit records identify the robot and safe external provenance such as issuer
-  and subject; they never include bearer secrets.
+- Quay must not log external JWTs, Federated Robot API JWTs, or opaque Managed
+  Robot API Token secrets.
+- CSRF exemptions apply only after a valid scoped Robot API credential has
+  authenticated, not to arbitrary robot credentials.
+- Audit records identify the robot and safe credential provenance, such as a
+  federation binding ID/version or managed token UUID/name. Exchange audit
+  events may include safe external provenance such as issuer and subject, but
+  never bearer secrets.
 
 ## 10. Compatibility and rollout
 
-- The federation capability is additive. Existing robot credentials,
-  registry-only federation bindings, OAuth clients, human tokens, and
-  programmatic bootstrap retain their behavior.
-- Existing federation bindings without API scopes continue to issue
-  registry-only JWTs and cannot call the Management API.
-- API scope support, binding ID/version invalidation, and audience validation
-  are rolled out behind the normal feature/configuration controls.
-- Documentation and UI should guide CI users toward a dedicated organization
-  robot with narrowly assigned roles and a short-lived exchanged token.
+Two default-off feature flags control rollout:
+
+- `FEATURE_ROBOT_API_TOKENS` enables Managed Robot API Token lifecycle routes
+  and UI, and authentication for both Managed and Federated Robot API Tokens.
+- `FEATURE_ROBOT_API_TOKEN_EXCHANGE` enables `/sts/token` issuance and its UI
+  scope controls. Schema validation requires `FEATURE_ROBOT_API_TOKENS` when
+  this flag is enabled.
+
+When the parent capability is disabled, lifecycle routes are not registered
+and return HTTP 404, while attempted Robot API Token authentication fails as
+ordinary HTTP 401 authentication failure. Persisted managed token and binding
+records are retained and become usable again when the capability is re-enabled
+unless they expired, were revoked, or were invalidated independently.
+
+Disabling only exchange stops new STS issuance and hides exchange controls. It
+does not invalidate an already-issued Federated Robot API Token; that token
+remains usable until expiry unless the binding changes, the robot is disabled,
+its permissions change, or the parent capability is disabled.
+
+The capability is otherwise additive. Existing static robot credentials,
+registry-only federation, OAuth clients, human tokens, and programmatic
+bootstrap retain their behavior. The legacy federation endpoint always issues
+registry-only JWTs, including for bindings that also contain API scopes.
+Documentation and UI should guide CI users toward a dedicated organization
+robot with narrowly assigned roles and a short-lived exchanged token.
 
 ## 11. Test plan and acceptance criteria
 
@@ -325,25 +374,38 @@ scope-plus-live-permission authorization rule.
   audience, and exact-subject matching.
 - Verify an exchange rejects missing, malformed, expired, wrong-issuer,
   wrong-audience, or unbound JWTs.
-- Verify requested scopes cannot exceed the binding scopes.
+- Verify omitted scopes use the binding ceiling and requested scopes outside
+  that ceiling are rejected rather than silently reduced.
 - Verify a valid JWT remains constrained by current robot permissions and is
   denied after robot disablement or permission removal.
-- Verify Management API Bearer authentication and registry Basic token exchange
-  work for scoped Robot API JWTs.
+- Verify STS-issued JWTs work for Management API Bearer authentication and
+  registry Basic token exchange.
+- Verify the legacy federation endpoint always issues a registry-only JWT with
+  no `api_scopes`, even for a binding that has an API-scope ceiling.
 - Verify `direct_user_login` cannot be issued and `super:user` remains
   feature-gated and live-robot-gated.
 - Verify binding update/deletion invalidates already issued federation JWTs.
-- Verify human-created token expiry, listing, last-use tracking, active-token
-  limits, and soft revocation.
+- Verify opaque `qro_` token creation, one-time secret return, expiry, listing,
+  last-use tracking, active-token limits, hashed secret validation, and soft
+  revocation.
+- Verify exchange cannot be enabled without the parent feature flag.
+- Verify disabled lifecycle and STS routes return HTTP 404 and disabled token
+  authentication returns HTTP 401 without deleting persisted records.
+- Verify disabling exchange stops new issuance while already-issued Federated
+  Robot API Tokens remain valid until their normal expiry or an independent
+  invalidation event.
 
 ### End-to-end coverage
 
 - An organization admin configures a dedicated organization robot with a
   Kubernetes ServiceAccount binding and narrow API scopes.
-- The workload exchanges a projected ServiceAccount JWT and creates or reads
-  only resources allowed by both the token scope and the robot's roles.
-- The same JWT completes a registry token exchange only for repositories the
-  robot may access.
+- The workload exchanges a projected ServiceAccount JWT through `/sts/token`
+  and creates or reads only resources allowed by both the token scope and the
+  robot's roles.
+- The STS-issued JWT completes a registry token exchange only for repositories
+  the robot may access, while the legacy endpoint remains registry-only.
+- An authorized human creates, uses, lists, and revokes an opaque Managed Robot
+  API Token without exposing its secret after creation.
 - A workload requesting an unbound scope, using another robot name, or using
   a changed/deleted binding is denied.
 - A robot can bootstrap ownership of a newly created organization only when it
