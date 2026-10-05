@@ -7,7 +7,7 @@ reviewers:
 approvers:
   - TBD
 creation-date: 2026-08-31
-last-updated: 2026-09-30
+last-updated: 2026-10-05
 status: implemented
 see-also:
   - "https://github.com/quay/quay-operator/pull/1324"
