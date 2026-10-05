@@ -3,371 +3,631 @@ title: STS/CCO Integration for AWS S3 Authentication
 authors:
   - "@sudipshil9862"
 reviewers:
-  - TBD
+  - "@Marcusk19"
 approvers:
   - TBD
 creation-date: 2026-08-31
-last-updated: 2026-08-31
-status: provisional
+last-updated: 2026-09-30
+status: implemented
 see-also:
-  - "/enhancements/template.md"
+  - "https://github.com/quay/quay-operator/pull/1324"
+  - "https://github.com/openshift/release/pull/85698"
 ---
 
 # STS/CCO Integration for AWS S3 Authentication
 
 ## Release Signoff Checklist
 
-- [ ] Enhancement is `implementable`
-- [ ] Design details are appropriately documented from clear requirements
-- [ ] Test plan is defined
-- [ ] Graduation criteria for dev preview, tech preview, GA
+- [x] Enhancement is implementable
+- [x] Design details are appropriately documented from clear requirements
+- [x] Test plan is defined and implemented
+- [x] Graduation criteria for dev preview, tech preview, and GA are defined
 
 ## Summary
 
-Integrate the Quay operator with OpenShift's Cloud Credential Operator (CCO)
-CredentialsRequest flow so that Quay application pods on STS-enabled clusters
-(ROSA, OSD) can authenticate to AWS S3 using short-lived tokens via
-`AssumeRoleWithWebIdentity` instead of static IAM access keys.
+The Quay Operator supports OpenShift Cloud Credential Operator (CCO)
+`CredentialsRequest` integration so that Quay application and repository-mirror
+pods can access an existing AWS S3 bucket with short-lived credentials instead
+of storing long-lived AWS access keys in the Quay configuration.
 
-The operator follows the standardized OLM + CCO `CredentialsRequest` flow. When
-an admin provides an IAM role ARN during operator installation, the operator
-creates a CredentialsRequest, CCO provisions a Secret containing a credentials
-file, and the operator mounts that Secret into quay-app pods so boto3
-transparently assumes the role.
+An administrator creates the S3 bucket, bucket-scoped IAM policy, IAM role, and
+OIDC trust relationship. The administrator supplies the role ARN to the Quay
+Operator through `ROLEARN` and configures unmanaged `S3Storage` without static
+keys. The Operator validates the environment, creates a `CredentialsRequest`,
+waits for and validates the profile Secret produced by CCO, and mounts that
+profile together with a projected OpenShift service-account token into the Quay
+app and mirror pods. The AWS SDK in those workloads exchanges the token for
+temporary credentials through `AssumeRoleWithWebIdentity` and uses them to
+access S3.
+
+The Quay Operator configures this identity flow but never calls AWS STS or S3
+itself.
+
+Implementation and live validation are available in:
+
+- [quay/quay-operator#1324](https://github.com/quay/quay-operator/pull/1324)
+- [openshift/release#85698](https://github.com/openshift/release/pull/85698)
+- [quay/quay-operator#1350](https://github.com/quay/quay-operator/pull/1350)
+  (post-merge STS validation)
 
 ## Motivation
 
-Customers on ROSA/OSD-AWS clusters enforce IAM-role-only security policies
-that prohibit static IAM user keys. Without this feature, those customers
-cannot use real AWS S3 for Quay storage. Red Hat platform strategy mandates
-all OLM operators capable of cloud API integration adopt the CCO
-CredentialsRequest flow.
+Customers running Quay on ROSA, OSD-AWS, and other STS-enabled OpenShift
+clusters may prohibit static IAM user keys. Before this enhancement, an
+external AWS S3 configuration normally required long-lived access and secret
+keys in the Quay config bundle. Those keys introduce storage, rotation, and
+security-policy concerns.
+
+OpenShift provides a standard workload-identity flow in which a pod presents a
+short-lived OpenShift service-account token to AWS STS. AWS verifies the token
+through the cluster's registered OIDC provider and returns temporary
+credentials. Integrating Quay with CCO follows this platform pattern and removes
+the need to store static AWS keys in Quay configuration.
 
 ### Goals
 
-- Enable Quay operator to authenticate to AWS S3 via short-lived STS tokens
-  on STS-enabled OpenShift clusters using the standard CCO CredentialsRequest
-  flow.
-- Gracefully fall back to regular operations when no role ARN is provided.
-- Degrade with clear status conditions when the role ARN is provided but CCO
-  does not reconcile the CredentialsRequest (e.g., on clusters older than
-  OCP 4.14).
-- Document the specific IAM permissions required when integrating with AWS
-  using STS and provide instructions to create the necessary IAM role.
-- Support RHEL-based (non-operator) Quay deployments with documentation on
-  how to supply the required role for boto3's `assume_role` flow.
+- Enable Quay app and mirror workloads to access external AWS S3 with
+  short-lived STS credentials.
+- Follow the standard OLM and CCO `CredentialsRequest` pattern.
+- Preserve existing behavior when `ROLEARN` is not configured.
+- Support only applicable unmanaged `S3Storage` entries.
+- Reject ambiguous configurations containing both `ROLEARN` and static S3
+  credentials.
+- Report actionable pending and failure conditions on `QuayRegistry`.
+- Restrict generated S3 permission statements to configured buckets and the
+  operations Quay requires.
+- Document IAM, OIDC, Operator installation, Quay configuration, verification,
+  and standalone RHEL-based Quay requirements.
+- Validate the complete flow on a real, isolated AWS OpenShift cluster.
 
 ### Non-Goals
 
-- Azure WIF and GCP WIF support — tracked separately.
-- Managed ObjectStorage (NooBaa) — NooBaa manages its own credentials.
-- Changes to the Quay application code — boto3's standard credential chain
-  reads `AWS_SHARED_CREDENTIALS_FILE` transparently.
-- Support for OCP versions older than 4.14.
+- Creating a customer's production S3 bucket, IAM role, IAM policy, or AWS OIDC
+  provider.
+- Giving the Quay Operator itself AWS credentials or direct S3 access.
+- Supporting managed NooBaa/ODF object storage through this flow.
+- Supporting Azure or Google workload identity.
+- Using the legacy Quay `STSS3Storage` driver.
+- Providing static AWS keys as an STS fallback.
+- Supporting OpenShift versions older than 4.14.
 
 ## Proposal
 
 ### User Stories
 
-#### Story 1 — STS-enabled cluster installation
+#### Story 1 — STS-enabled OpenShift installation
 
-As a cluster admin on a ROSA/OSD cluster, I want to install the Quay operator
-from OperatorHub by providing my IAM role ARN in the console UI, so that Quay
-uses short-lived STS tokens for S3 access without static IAM credentials.
+As a cluster administrator, I want to configure the Quay Operator with an IAM
+role ARN and an existing S3 bucket so that Quay uses short-lived AWS
+credentials without storing static access keys.
 
-#### Story 2 — Graceful fallback on non-STS clusters
+#### Story 2 — Backward-compatible default
 
-As a cluster admin on a standard OpenShift cluster without STS, I want the
-Quay operator to work normally when no role ARN is provided, with no change
-to existing behavior.
+As an existing Quay administrator, I want deployments without `ROLEARN` to
+continue using their current storage behavior without any STS resources or
+workload changes.
 
-#### Story 3 — Clear error reporting
+#### Story 3 — Clear prerequisite failures
 
-As a cluster admin, when I provide a role ARN but CCO cannot provision
-credentials (e.g., on OCP < 4.14 or with a misconfigured CCO), I want to see
-clear status conditions on the QuayRegistry resource explaining what is wrong
-and how to fix it.
+As a cluster administrator, I want the Operator to explain when the cluster is
+not on AWS, CCO is not in Manual mode, the OIDC issuer is missing, the
+CredentialsRequest API is unavailable, or CCO cannot provision the current
+request.
 
 #### Story 4 — Credential conflict detection
 
-As a cluster admin, if my storage config contains static AWS keys while a role
-ARN is also set, I want the operator to block rollout and tell me to remove
-the static credentials, so I do not end up in an ambiguous credential state.
+As a cluster administrator, I want the Operator to block rollout when an
+applicable `S3Storage` entry contains static keys while `ROLEARN` is enabled, so
+that Quay does not start with an ambiguous credential source.
 
 #### Story 5 — RHEL-based Quay
 
-As a RHEL-based Quay administrator (non-operator deployment), I want
-documentation explaining how to configure STS authentication manually by
-creating the AWS credentials file, setting the environment variable, and
-providing a token at the expected path.
+As a standalone Quay administrator, I want documentation explaining how to
+provide a web-identity token and shared AWS profile without the Operator or CCO.
 
-### Implementation Details/Notes/Constraints
+### Prerequisites and Ownership
 
-**Constraints:**
+The AWS or cluster administrator creates and owns:
 
-- **OCP 4.14+ minimum** — older versions are explicitly out of scope.
-- **AWS only** — Azure WIF and GCP WIF tracked separately.
-- **`managed: false` ObjectStorage only** — NooBaa manages its own credentials
-  when storage is managed.
-- **No Quay app changes required** — boto3's standard credential chain reads
-  `AWS_SHARED_CREDENTIALS_FILE` transparently. Verified against quay/quay
-  master: `S3Storage.__init__` accepts `s3_access_key=None,
-  s3_secret_key=None` as defaults; when both are `None`, boto3 falls through
-  to its default credential chain.
-- **Runtime CredentialsRequest creation** — the operator creates the
-  CredentialsRequest at runtime (not shipped in the OLM bundle).
-- **CredentialsRequest in registry namespace** — enables ownerReference-based
-  garbage collection tied to the QuayRegistry CR.
-- **cloudTokenPath**:
-  `/var/run/secrets/openshift/serviceaccount/token` — the OpenShift-specific
-  path with audience `openshift`.
+- the external S3 bucket;
+- a policy limited to that bucket;
+- an IAM role with that policy;
+- a trust policy for the cluster's AWS OIDC provider;
+- the OLM `ROLEARN` configuration;
+- the credential-free Quay `S3Storage` configuration.
 
-**User workflow:**
+The role trust policy permits `sts:AssumeRoleWithWebIdentity` only for the
+expected service-account identity:
 
-1. Admin installs the Quay operator from OperatorHub, providing their IAM role
-   ARN in the console UI (or via `ROLEARN` env var in the Subscription).
-2. Operator detects the STS-capable cluster, creates a `CredentialsRequest`
-   with the role ARN.
-3. CCO provisions a Secret containing a credentials file (role ARN + web
-   identity token path).
-4. Operator mounts that Secret into `quay-app` pods and sets
-   `AWS_SHARED_CREDENTIALS_FILE`.
-5. boto3 in Quay transparently calls `AssumeRoleWithWebIdentity` and refreshes
-   temporary credentials.
+```text
+aud = openshift
+sub = system:serviceaccount:<namespace>:<quayregistry-name>-quay-app
+```
+
+CCO runs in `Manual` credentials mode for this design. It processes the
+`CredentialsRequest` and creates a Kubernetes profile Secret, but it does not
+create the AWS IAM role or policy.
+
+### User Workflow
+
+1. The administrator creates the S3 bucket, IAM policy, IAM role, and OIDC trust
+   relationship.
+2. The administrator sets `ROLEARN` in the Quay Operator Subscription.
+3. The administrator configures `objectstorage` as unmanaged and provides an
+   `S3Storage` entry with a bucket and no static keys.
+4. The Operator validates the configuration and cluster capabilities.
+5. The Operator creates or updates the `CredentialsRequest`.
+6. CCO creates a profile Secret containing `role_arn` and
+   `web_identity_token_file`.
+7. The Operator validates the current CCO request generation and profile.
+8. The Operator configures Quay app and mirror Deployments with the profile and
+   projected service-account token.
+9. Quay calls AWS STS and uses the returned temporary credentials for S3.
+10. The AWS SDK refreshes temporary credentials as they approach expiration.
+
+### Constraints
+
+- OpenShift 4.14 or later.
+- AWS infrastructure platform.
+- CCO `Manual` mode.
+- A non-empty OpenShift service-account issuer and corresponding AWS IAM OIDC
+  provider.
+- `objectstorage` set to `managed: false`.
+- Standard `S3Storage` with one or more concrete `s3_bucket` values.
+- No `s3_access_key` or `s3_secret_key` in applicable `S3Storage` entries.
+- Quay 3.17 or later, or a build containing the S3 default-credential-chain
+  fix needed to resolve the CCO web-identity profile.
+- `cloudTokenPath` set to
+  `/var/run/secrets/openshift/serviceaccount/token` with audience `openshift`.
+
+## Design Details
+
+### STS Capability Detection
+
+`controllers/quay/features.go` implements `checkSTSCapability()`.
+
+The reconcile context includes:
+
+```go
+StorageSTSEnabled        bool
+STSRoleARN               string
+STSStorageBuckets        []string
+STSCredentialSecretName  string
+STSCredentialProvisioned bool
+```
+
+When `ROLEARN` is set, the Operator checks:
+
+1. Object storage is unmanaged.
+2. The flattened config contains at least one standard `S3Storage` backend.
+3. Applicable S3 entries contain concrete bucket names.
+4. Applicable S3 entries do not contain static access or secret keys.
+5. The `CredentialsRequest` API was discovered through the RESTMapper when the
+   controller started.
+6. The cluster infrastructure platform is AWS.
+7. The cluster `CloudCredential` mode is `Manual`.
+8. The cluster has a configured service-account issuer.
+
+Static credentials belonging to unrelated storage drivers do not enable or
+block the S3 STS flow. Managed storage and configurations without an applicable
+`S3Storage` backend skip STS rather than changing normal behavior.
+
+### CredentialsRequest Shape
+
+The request is created in the `QuayRegistry` namespace with the name:
+
+```text
+<quayregistry-name>-aws-credentials
+```
+
+It contains:
+
+- the configured role ARN;
+- the Quay app service-account name;
+- the projected-token file path;
+- the requested output Secret name and namespace;
+- bucket-level and object-level S3 statements for each configured bucket;
+- a `QuayRegistry` owner reference.
+
+The output Secret name is:
+
+```text
+<quayregistry-name>-aws-sts-credentials
+```
+
+Bucket-level actions are:
+
+```text
+s3:ListBucket
+s3:GetBucketLocation
+s3:ListBucketMultipartUploads
+```
+
+Object-level actions are:
+
+```text
+s3:GetObject
+s3:PutObject
+s3:DeleteObject
+s3:AbortMultipartUpload
+s3:ListMultipartUploadParts
+```
+
+Resources are limited to:
+
+```text
+arn:<partition>:s3:::<bucket>
+arn:<partition>:s3:::<bucket>/*
+```
+
+The AWS partition is derived from the role ARN. Wildcard bucket names are
+rejected.
+
+The implementation uses local wire types in `pkg/credentialsrequest/` that
+mirror the required CCO API fields. It intentionally avoids importing CCO's
+internal Go API and its incompatible transitive Kubernetes dependencies.
+
+### CredentialsRequest Lifecycle
+
+The Operator uses only these verbs for `CredentialsRequest`:
+
+```text
+create, get, update, delete
+```
+
+The Operator:
+
+1. Creates the request when it does not exist.
+2. Refuses to adopt a same-name request not owned by the current
+   `QuayRegistry`.
+3. Updates the specification when the role, buckets, service account, output
+   Secret, or token path changes.
+4. Waits for `status.provisioned=true`.
+5. Requires `status.lastSyncGeneration` to match the current generation.
+6. Waits for the output Secret.
+7. Escalates the condition after the five-minute provisioning timeout.
+
+A request timestamp annotation is updated when the desired request changes so
+that the timeout applies to the current provisioning attempt.
+
+When STS no longer applies, the Operator deletes only the same-name request
+owned by the current `QuayRegistry`. The owner reference also allows Kubernetes
+garbage collection when the registry is deleted.
+
+### CCO Profile Secret
+
+The CCO Secret contains a shared profile similar to:
+
+```ini
+[default]
+role_arn = arn:aws:iam::123456789012:role/example-quay-sts
+web_identity_token_file = /var/run/secrets/openshift/serviceaccount/token
+```
+
+The service-account token is not stored in this Secret. OpenShift projects it
+separately into the pod.
+
+Before rendering STS-enabled workloads, the Operator verifies:
+
+- the `credentials` entry is non-empty;
+- static `aws_access_key_id` and `aws_secret_access_key` entries are absent;
+- `role_arn` exactly matches `ROLEARN`;
+- `web_identity_token_file` exactly matches the expected projected path.
+
+### Workload Configuration
+
+STS configuration applies only to Deployments ending in `quay-app` or
+`quay-mirror`.
+
+The Operator adds:
+
+```text
+Secret volume:     aws-sts-credentials
+Secret mount:      /aws-sts (read only)
+Projected volume:  bound-sa-token
+Token mount:       /var/run/secrets/openshift/serviceaccount (read only)
+Token audience:    openshift
+```
+
+It also adds:
+
+```text
+AWS_SHARED_CREDENTIALS_FILE=/aws-sts/credentials
+AWS_SDK_LOAD_CONFIG=true
+```
+
+Same-name volumes and mounts are replaced with the desired definitions instead
+of being retained unchanged. This keeps reconciliation idempotent and repairs
+conflicting existing definitions.
+
+PostgreSQL, Redis, Clair, and unrelated workloads do not receive these mounts or
+environment variables.
+
+### Runtime Credential Flow
+
+```text
+OpenShift API server
+    -> signs and rotates the Quay service-account JWT
+Quay AWS SDK
+    -> reads role_arn and the projected JWT
+    -> calls AWS STS AssumeRoleWithWebIdentity
+AWS STS
+    -> verifies issuer, signature, audience, subject, expiration, and trust
+    -> returns temporary access key, secret key, session token, and expiration
+Quay AWS SDK
+    -> caches and refreshes the temporary session
+    -> signs S3 requests
+AWS S3
+    -> authorizes requests against the role and bucket policy
+```
+
+Neither CCO nor the Quay Operator receives the temporary STS credentials. They
+remain in the AWS SDK credential provider inside the Quay process.
+
+### OLM and RBAC
+
+The CSV declares:
+
+```yaml
+features.operators.openshift.io/token-auth-aws: "true"
+```
+
+The Operator's CredentialsRequest RBAC is limited to:
+
+```text
+create;delete;get;update
+```
+
+The Operator pod does not receive a projected AWS token because the Operator
+does not call AWS APIs.
+
+### Condition Reporting
+
+The implementation uses the existing `RolloutBlocked` condition type.
+
+| Reason | Trigger | Resolution |
+|---|---|---|
+| `CredentialRequestPending` | The current request generation or output Secret is not ready before the timeout. | CCO provisions the current request and valid Secret. |
+| `CredentialRequestNotProvisioned` | Provisioning exceeds five minutes or the profile is missing/invalid. | Correct CCO, role, profile, or cluster configuration. |
+| `ConflictingCredentials` | An applicable `S3Storage` entry contains static keys while `ROLEARN` is set. | Remove static keys or remove `ROLEARN`. |
+| `ConfigInvalid` | AWS, CCO mode, OIDC issuer, role ARN, S3, or API prerequisites are invalid. | Correct the reported prerequisite. |
+
+Rollout remains blocked until a valid current-generation profile is available.
+
+### Security Properties
+
+- No static AWS access key or secret key is stored in Quay configuration.
+- The CCO profile stores only the role ARN and token-file path.
+- OpenShift rotates the projected service-account token.
+- The IAM trust policy limits issuer, audience, namespace, and service account.
+- S3 permissions are limited to configured buckets and required actions.
+- Only Quay app and mirror workloads receive the profile and token.
+- The Operator does not receive S3 credentials or access S3.
+- RBAC follows least privilege.
+- Same-name CredentialsRequests are not adopted across registries.
 
 ### Risks and Mitigations
 
 | Risk | Mitigation |
-|------|-----------|
-| CCO fails to provision credentials silently | Operator sets `RolloutBlocked` condition with escalating reasons (`Pending` → `NotProvisioned` after 5-minute timeout) |
-| Admin provides both static keys and role ARN | Operator detects conflict, blocks rollout with `ConflictingCredentials` condition and actionable message |
-| CredentialsRequest CRD not present on cluster | Operator detects missing CRD (like existing NooBaa detection) and sets `RolloutBlocked` indicating OCP 4.14+ is required |
-| Admin provides ROLEARN but ObjectStorage is managed | Operator logs a warning and skips STS path — does not block |
+|---|---|
+| CCO never provisions the request | Pending condition followed by a blocked NotProvisioned reason after five minutes. |
+| Stale CCO result is used after a request change | Require `lastSyncGeneration` to match the current generation. |
+| A malformed or static-key profile is mounted | Validate profile contents, role ARN, and token path before rollout. |
+| Static keys and STS are configured together | Block with `ConflictingCredentials`. |
+| Permissions are broader than required | Generate bucket-specific actions and document a matching IAM policy. |
+| An unrelated request uses the expected name | Verify the `QuayRegistry` owner reference and refuse adoption. |
+| Older Quay image cannot resolve web identity | Require Quay 3.17+ or the default-credential-chain fix. |
+| CCO takes longer than five minutes | Reconciliation continues; the condition can recover when CCO eventually provisions a valid current generation. |
 
-## Design Details
+Security-sensitive setup is documented in `docs/sts-iam-setup.md` in the Quay
+Operator repository.
 
-### Section 1: STS Detection Chain
+## Test Plan
 
-Added to `controllers/quay/features.go` as `checkSTSCapability()`, following
-the pattern of `checkObjectBucketClaimsAvailable()` and
-`checkMonitoringAvailable()`.
+### Unit and Controller Tests
 
-**New context fields** in `pkg/context/context.go`:
+Tests cover:
 
-```go
-StorageSTSEnabled         bool
-STSRoleARN                string
-STSCredentialSecretName   string
-STSCredentialProvisioned  bool
+- empty `ROLEARN` fallback;
+- managed storage and non-S3 storage behavior;
+- AWS platform, CCO mode, OIDC issuer, and CRD prerequisites;
+- static-key conflict detection scoped to `S3Storage`;
+- role ARN and AWS partition validation;
+- bucket-specific CredentialsRequest construction;
+- create, update, ownership, generation, timeout, validation, and cleanup paths;
+- profile rejection for static keys, wrong role, or wrong token path;
+- app/mirror-only injection;
+- environment variables, volumes, mounts, replacement, and idempotency.
+
+### Live E2E Test
+
+[openshift/release#85698](https://github.com/openshift/release/pull/85698)
+added the optional `ocp-latest-e2e-sts` presubmit. It uses the standard
+`openshift-org-aws` cluster profile and creates an isolated AWS IPI OpenShift
+cluster with CCO Manual mode and a per-cluster OIDC provider.
+
+The job:
+
+1. Creates the ephemeral cluster and OIDC infrastructure.
+2. Creates a unique namespace, S3 bucket, IAM role, trust policy, and
+   bucket-scoped inline policy.
+3. Installs the PR-built Quay Operator bundle with `ROLEARN`.
+4. Runs `make test-e2e-sts` from the Operator source.
+5. Verifies the request, current generation, profile, token audience, workload
+   mounts, and absence of static keys.
+6. Pushes and pulls a real image through S3.
+7. Configures repository mirroring and pulls the mirrored image.
+8. Destroys the cluster, OIDC/platform infrastructure, role, policy, S3
+   contents, multipart uploads, versions, and bucket.
+
+The job does not use the shared Quay QE cluster or a Quay DEV credential
+collection. Every run owns its cluster and AWS resources.
+
+The final post-merge validation passed in
+[quay/quay-operator#1350](https://github.com/quay/quay-operator/pull/1350):
+
+```text
+ci/prow/ocp-latest-e2e-sts: PASS
 ```
 
-**Detection logic** (called early in the reconcile loop, after object storage
-checks):
+### E2E Race Fixes
 
-1. Read `ROLEARN` from `os.Getenv("ROLEARN")` — if empty, return immediately
-   (graceful fallback).
-2. Check if ObjectStorage is `managed: true` — if so, log warning and return.
-3. Check if `configBundleSecret` contains static AWS keys
-   (`s3_access_key`/`s3_secret_key` in `DISTRIBUTED_STORAGE_CONFIG`) — if so,
-   set `RolloutBlocked` with `ConflictingCredentials` reason.
-4. Verify CredentialsRequest CRD exists on cluster (unstructured list, like
-   `ObjectBucketClaim` detection) — if not, set `RolloutBlocked` indicating
-   CCO/OCP 4.14+ required.
-5. Set `qctx.StorageSTSEnabled = true` and `qctx.STSRoleARN = roleARN`.
+Two test timing problems were corrected during live validation:
 
-### Section 2: CredentialsRequest Lifecycle
+- The test now waits for the Quay app and mirror Deployments to exist before
+  running `kubectl rollout status`.
+- Repository automatic synchronization is scheduled one hour in the future
+  before the test calls `sync-now`, preventing the background worker and manual
+  trigger from racing.
 
-Logic lives in `controllers/quay/quayregistry_controller.go` as
-`ensureCredentialsRequest()`, called from the reconcile loop after
-`checkSTSCapability()` populates the context.
+### Relationship to Other E2E Jobs
 
-**CredentialsRequest object spec:**
+- `ocp-latest-e2e` uses managed ODF/NooBaa storage and runs the general
+  Chainsaw suite. It does not validate short-lived AWS credentials.
+- `ocp-latest-e2e-sts` uses a Manual-mode/OIDC cluster and real external S3.
+- KinD E2E cannot validate AWS, OpenShift CCO, OIDC, or STS behavior.
 
-- **Name**: `<quayregistry-name>-aws-credentials`
-- **Namespace**: Same as QuayRegistry
-- **OwnerReference**: Set to QuayRegistry CR (enables GC on CR deletion)
-- **ProviderSpec**: AWS provider with `s3:*` statement entry and the role ARN
-- **SecretRef**: `<quayregistry-name>-aws-sts-credentials` in the registry
-  namespace
-- **ServiceAccountNames**: The quay-app service account
-- **CloudTokenPath**:
-  `/var/run/secrets/openshift/serviceaccount/token`
+## Graduation Criteria
 
-**Reconcile flow:**
+### Dev Preview
 
-1. If `qctx.StorageSTSEnabled` is false, skip entirely.
-2. Build the desired CredentialsRequest spec.
-3. Get or create the CredentialsRequest, updating if the role ARN changed.
-4. Check for the CCO-provisioned Secret:
-   - If found with `credentials` key: mark provisioned, continue to Inflate.
-   - If not found: set pending condition, requeue after 10 seconds.
-5. If Secret hasn't appeared after 5 minutes (based on CredentialsRequest
-   `creationTimestamp`), escalate to `RolloutBlocked` with
-   `CredentialRequestNotProvisioned`.
+- STS capability detection and graceful fallback implemented.
+- CredentialsRequest lifecycle and profile validation implemented.
+- App and mirror workload injection implemented.
+- Unit tests cover detection, request construction, and middleware behavior.
 
-### Section 3: Volume and Environment Injection
+**Status:** Complete.
 
-Logic lives in `pkg/middleware/middleware.go` as `applySTSCredentials()`,
-called from the `Process()` function alongside `applyPostgresTLS()` and
-`applyClairDBTLS()`. Only runs on `quay-app` and `quay-mirror` deployments.
+### Tech Preview
 
-**Three things are mounted into quay-app/quay-mirror pods:**
+- AWS IAM and installation documentation available.
+- Real ephemeral AWS CCO/STS/S3 E2E test available.
+- Status and failure conditions verified.
+- Live push, pull, and mirror operations pass without static credentials.
 
-1. **CCO-provisioned credentials Secret** — mounted read-only at `/aws-sts`
-2. **Bound service account token** — projected volume mounted at
-   `/var/run/secrets/openshift/serviceaccount` with audience `openshift`
-3. **Environment variable** — `AWS_SHARED_CREDENTIALS_FILE=/aws-sts/credentials`
+**Status:** Complete.
 
-**Guard conditions:**
-- Only applies when `qctx.StorageSTSEnabled && qctx.STSCredentialProvisioned`
-- Only applies to `quay-app` and `quay-mirror` deployments
-- Does not apply to clair-app, postgres, redis, or other deployments
+### GA
 
-### Section 4: CSV Changes
+- Included in a supported Quay Operator release with a compatible Quay image.
+- Documentation reviewed for the target release.
+- Upgrade and downgrade behavior validated for supported release paths.
+- Sufficient production or field feedback from STS-enabled deployments.
+- Periodic or otherwise regularly exercised live STS coverage is maintained if
+  CI cost permits.
 
-Two modifications to the ClusterServiceVersion:
+## API Design
 
-1. **Annotation**: Set `features.operators.openshift.io/token-auth-aws: "true"`
-   so OperatorHub shows the role ARN input field during installation. OLM
-   injects the admin-provided ARN as the `ROLEARN` env var on the operator pod
-   via the Subscription config.
+No new Quay API endpoint or `QuayRegistry` specification field is introduced.
+Configuration uses:
 
-2. **clusterPermissions**: Add RBAC for CredentialsRequest CRUD:
-   ```yaml
-   - apiGroups:
-     - "cloudcredential.openshift.io"
-     resources:
-     - credentialsrequests
-     verbs:
-     - create
-     - delete
-     - get
-     - list
-     - patch
-     - update
-     - watch
-   ```
+- `ROLEARN` on the Operator Deployment, normally supplied through the OLM
+  Subscription;
+- existing unmanaged object-storage configuration in the config bundle;
+- existing `QuayRegistry` status conditions.
 
-### Section 5: Condition Reporting
+The Operator creates a `cloudcredential.openshift.io/v1` CredentialsRequest.
+The resource has a `QuayRegistry` owner reference; CCO watches and processes it.
 
-New condition reasons added to `apis/quay/v1/quayregistry_types.go`:
+## Upgrade / Downgrade Strategy
 
-| Condition | Type | Trigger | Cleared when |
-|-----------|------|---------|-------------|
-| `CredentialRequestPending` | `RolloutBlocked` | CredentialsRequest created but CCO Secret not yet provisioned (< 5 min) | Secret appears |
-| `CredentialRequestNotProvisioned` | `RolloutBlocked` | CCO Secret still missing after 5 minutes | Secret appears |
-| `ConflictingCredentials` | `RolloutBlocked` | ROLEARN set + static `s3_access_key`/`s3_secret_key` in configBundleSecret | Admin removes static keys from config |
+### Upgrade
 
-All three use the existing `ConditionTypeRolloutBlocked` type and follow the
-same pattern as `ConditionReasonConfigInvalid` and
-`ConditionReasonComponentCreationFailed`.
+Existing installations without `ROLEARN` are unchanged. To enable STS, the
+administrator must create the AWS resources, remove static S3 keys, configure
+`ROLEARN`, and ensure the external S3 config is unmanaged. The Operator then
+creates the request and blocks rollout until CCO provisions a valid profile.
 
-### Relevant Codebase Files
+Existing owned requests are updated when their desired role, buckets, service
+account, output Secret, or token path changes.
 
-| File | Role | What changes |
-|------|------|-------------|
-| `pkg/context/context.go` | Reconcile-scoped state | Add STS context fields |
-| `controllers/quay/features.go` | Feature detection | Add `checkSTSCapability()` |
-| `controllers/quay/quayregistry_controller.go` | Main reconcile loop | Add CredentialsRequest lifecycle, conditions |
-| `pkg/middleware/middleware.go` | Deployment mutation | Add `applySTSCredentials()` |
-| `apis/quay/v1/quayregistry_types.go` | Condition types | Add new condition reasons |
-| `bundle/manifests/quay-operator.clusterserviceversion.yaml` | OLM metadata | Update annotation, add clusterPermissions |
+### Downgrade
 
-### Test Plan
+Before downgrading to an Operator version without this feature, the
+administrator must choose another credential mechanism. For the traditional S3
+flow this means restoring static access and secret keys in the config bundle and
+removing `ROLEARN` before downgrade.
 
-- **Unit tests**: Test `checkSTSCapability()` detection logic across all
-  branches (no ROLEARN, managed storage, static key conflict, missing CRD,
-  happy path).
-- **Unit tests**: Test `ensureCredentialsRequest()` create/update/wait logic
-  with mock client.
-- **Unit tests**: Test `applySTSCredentials()` volume and env injection on
-  quay-app/quay-mirror deployments, and verify it is skipped for other
-  deployments.
-- **Integration tests**: Test full reconcile loop with a mock CCO (fake
-  CredentialsRequest CRD, fake Secret provisioning) to verify end-to-end
-  context flow from detection through injection.
-- **E2E tests**: On a real STS-enabled cluster (ROSA), verify:
-  - Operator creates CredentialsRequest with correct spec
-  - CCO provisions the expected Secret
-  - quay-app pods have the correct volume mounts and env var
-  - Quay can read/write objects to S3 without static credentials
-  - Removing ROLEARN and redeploying reverts to standard behavior
+An older Operator does not understand or mount the CCO profile. A remaining
+CredentialsRequest continues to have a `QuayRegistry` owner reference but may
+need manual removal after downgrade. The associated IAM role and S3 bucket
+remain administrator-owned and are not deleted by the Operator.
 
-### Graduation Criteria
+## Version Skew Strategy
 
-#### Dev Preview
-
-- Core STS detection and CredentialsRequest lifecycle implemented
-- Volume and environment injection working on quay-app pods
-- Unit test coverage for all detection branches and injection logic
-
-#### Tech Preview
-
-- End-to-end testing on ROSA clusters
-- Documentation for IAM role setup, installation workflow, and RHEL-based
-  deployments
-- Condition reporting verified in console UI
-- quay-mirror deployment also receives STS credentials
-
-#### GA
-
-- Sufficient production feedback from STS-enabled cluster deployments
-- Upgrade/downgrade testing (operator upgrade with existing CredentialsRequest)
-- Available by default when ROLEARN is provided
-- IAM permission documentation reviewed and finalized
-
-### API Design
-
-No new API endpoints are introduced. The feature is configured via:
-- `ROLEARN` environment variable on the operator pod (set by OLM from
-  Subscription config)
-- Existing `QuayRegistry` status conditions for reporting
-
-The operator creates a `CredentialsRequest` custom resource (owned by
-OpenShift's CCO, not Quay) in the registry namespace.
-
-### Upgrade / Downgrade Strategy
-
-- **Upgrade**: Existing clusters without ROLEARN see no change. Clusters where
-  an admin subsequently sets ROLEARN via Subscription config will trigger the
-  STS flow on the next reconcile.
-- **Downgrade**: If the operator is downgraded to a version without STS
-  support, the CredentialsRequest remains orphaned (ownerReference still
-  points to QuayRegistry). The admin should manually clean up the
-  CredentialsRequest. On downgrade, the admin must re-add static AWS
-  credentials (s3_access_key/s3_secret_key) to the configBundleSecret, since
-  the previous operator version does not support STS authentication. The STS
-  upgrade flow requires removing static keys, so they will not be present in
-  the config bundle after an upgrade to STS.
-
-### Version Skew Strategy
-
-- The operator requires OCP 4.14+ for CCO STS support. On older clusters, the
-  CredentialsRequest CRD will not exist and the operator will set a
-  `RolloutBlocked` condition.
-- The feature has no cross-component version skew concerns within Quay itself
-  — it is entirely operator-side configuration.
+- OpenShift 4.14+ is required for the supported CCO API and short-lived-token
+  flow.
+- The cluster must expose the CredentialsRequest API, AWS infrastructure,
+  Manual CCO mode, and a service-account issuer.
+- Quay 3.17+ or an image containing the S3 default-credential-chain fix is
+  required.
+- The Operator waits for the current CredentialsRequest generation before
+  changing workloads, preventing use of stale profile state during updates.
+- Older kubelets or non-OpenShift Kubernetes clusters are outside the supported
+  flow because the required CCO and OpenShift identity capabilities are absent.
 
 ## Implementation History
 
-- 2026-08-31: Initial enhancement proposal
+- **2026-08-31:** Initial enhancement proposal opened.
+- **2026-09-24:** Ephemeral STS CI job merged through
+  [openshift/release#85698](https://github.com/openshift/release/pull/85698).
+- **2026-09-25:** Live CCO/STS/S3 push, pull, and mirroring validation passed on
+  the feature PR.
+- **2026-09-30:** Operator implementation merged through
+  [quay/quay-operator#1324](https://github.com/quay/quay-operator/pull/1324).
+- **2026-09-30:** Post-merge STS validation passed through
+  [quay/quay-operator#1350](https://github.com/quay/quay-operator/pull/1350).
 
 ## Drawbacks
 
-- Adds a new external dependency on the `cloud-credential-operator` Go module
-  for CredentialsRequest types.
-- The 5-minute timeout for CCO Secret provisioning is a heuristic — in edge
-  cases CCO may take longer, leading to a premature `NotProvisioned` condition
-  that resolves on its own.
+- Local CredentialsRequest wire types must remain compatible with the supported
+  CCO API fields.
+- `ROLEARN` is configured at Operator-installation scope. An Operator managing
+  several registries requires a role trust policy covering every intended Quay
+  service-account subject, or separate Operator installations with appropriate
+  scope.
+- The five-minute escalation threshold is a heuristic. Slow CCO provisioning
+  can temporarily report `CredentialRequestNotProvisioned`, although later
+  reconciliation can recover.
+- Live validation creates an AWS OpenShift cluster and has greater time and
+  infrastructure cost than unit or KinD tests.
 
 ## Alternatives
 
-- **Bundle-shipped CredentialsRequest** (Alternative 2 from STS guide): The
-  CredentialsRequest is shipped in the OLM bundle instead of created at
-  runtime. This was rejected because it requires admin pre-work with `ccoctl`
-  and is less user-friendly.
-- **Existing `STSS3Storage` driver**: Quay has an existing `STSS3Storage`
-  class that uses the older `assume_role` flow with static IAM user keys.
-  This was not used because the standard `S3Storage` driver with
-  `AWS_SHARED_CREDENTIALS_FILE` is the correct approach for the CCO/web-identity
-  flow and requires no Quay app changes.
+### Store static AWS credentials
+
+Rejected as the primary solution because it retains long-lived secrets and does
+not satisfy IAM-role-only customer policies.
+
+### Bundle-shipped CredentialsRequest
+
+Rejected in favor of runtime creation because bucket names, registry namespace,
+service account, and role are instance-specific. Runtime reconciliation also
+supports ownership, updates, status checks, and cleanup.
+
+### Legacy `STSS3Storage`
+
+Rejected because it represents an older assume-role flow based on static source
+credentials. Standard `S3Storage` with the AWS default credential chain is the
+correct web-identity integration.
+
+### Shared Quay QE cluster for live testing
+
+The initial CI proposal used a long-lived shared cluster and separate Quay QE
+and Quay DEV credentials. It was replaced by an ephemeral cluster because
+shared OLM installations, cluster-wide CRDs, OIDC lifecycle, concurrent runs,
+and cleanup created unnecessary coupling and risk.
+
+## Infrastructure Needed
+
+The required CI infrastructure is implemented in
+[openshift/release#85698](https://github.com/openshift/release/pull/85698):
+
+- optional `ocp-latest-e2e-sts` presubmit;
+- standard `openshift-org-aws` cluster profile;
+- ephemeral Manual-mode/OIDC AWS OpenShift cluster;
+- run-owned S3 and IAM resources;
+- PR-built Operator installation;
+- complete post-job cluster and AWS cleanup.
+
+No shared Quay QE kubeconfig or Quay DEV AWS credential collection is required.
